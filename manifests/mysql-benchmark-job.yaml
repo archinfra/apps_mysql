@@ -1,0 +1,128 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __BENCHMARK_JOB_NAME__
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mysql-benchmark
+          image: __MYSQL_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+
+              export MYSQL_PWD="${MYSQL_ROOT_PASSWORD}"
+              mkdir -p /report
+              report_file="/report/${BENCHMARK_JOB_NAME}.txt"
+
+              ops_per_worker=$(( (MYSQL_BENCHMARK_QUERIES + MYSQL_BENCHMARK_CONCURRENCY - 1) / MYSQL_BENCHMARK_CONCURRENCY ))
+              total_operations=$(( ops_per_worker * MYSQL_BENCHMARK_CONCURRENCY * MYSQL_BENCHMARK_ITERATIONS ))
+
+              mysql \
+                --host="${MYSQL_HOST}" \
+                --port="${MYSQL_PORT}" \
+                --protocol=TCP \
+                --user="${MYSQL_USER}" \
+                -e "CREATE DATABASE IF NOT EXISTS offline_benchmark; CREATE TABLE IF NOT EXISTS offline_benchmark.bench_results (id BIGINT PRIMARY KEY AUTO_INCREMENT, worker_id INT NOT NULL, payload VARCHAR(64) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"
+
+              worker_run() {
+                local worker_id="$1"
+                local iteration=1
+
+                while (( iteration <= MYSQL_BENCHMARK_ITERATIONS )); do
+                  local sql_file
+                  sql_file="$(mktemp)"
+
+                  {
+                    echo "USE offline_benchmark;"
+                    local op=1
+                    while (( op <= ops_per_worker )); do
+                      printf "INSERT INTO bench_results(worker_id, payload) VALUES (%s, CONCAT('worker-', %s, '-op-', %s));\n" "${worker_id}" "${worker_id}" "${op}"
+                      printf "SELECT COUNT(*) FROM bench_results;\n"
+                      op=$((op + 1))
+                    done
+                  } > "${sql_file}"
+
+                  mysql \
+                    --host="${MYSQL_HOST}" \
+                    --port="${MYSQL_PORT}" \
+                    --protocol=TCP \
+                    --user="${MYSQL_USER}" < "${sql_file}" >/dev/null
+
+                  rm -f "${sql_file}"
+                  iteration=$((iteration + 1))
+                done
+              }
+
+              start_epoch="$(date +%s)"
+
+              worker=1
+              while (( worker <= MYSQL_BENCHMARK_CONCURRENCY )); do
+                worker_run "${worker}" &
+                worker=$((worker + 1))
+              done
+              wait
+
+              end_epoch="$(date +%s)"
+              duration=$(( end_epoch - start_epoch ))
+              if (( duration <= 0 )); then
+                duration=1
+              fi
+
+              final_rows="$(
+                mysql \
+                  --host="${MYSQL_HOST}" \
+                  --port="${MYSQL_PORT}" \
+                  --protocol=TCP \
+                  --user="${MYSQL_USER}" \
+                  -Nse "SELECT COUNT(*) FROM offline_benchmark.bench_results"
+              )"
+              throughput=$(( total_operations / duration ))
+
+              {
+                echo "mysql benchmark report"
+                echo "generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "host=${MYSQL_HOST}"
+                echo "concurrency=${MYSQL_BENCHMARK_CONCURRENCY}"
+                echo "iterations=${MYSQL_BENCHMARK_ITERATIONS}"
+                echo "requested_queries=${MYSQL_BENCHMARK_QUERIES}"
+                echo "ops_per_worker=${ops_per_worker}"
+                echo "estimated_total_operations=${total_operations}"
+                echo "duration_seconds=${duration}"
+                echo "throughput_ops_per_sec=${throughput}"
+                echo "final_row_count=${final_rows}"
+                echo "report_file=${BENCHMARK_JOB_NAME}.txt"
+              } | tee "${report_file}"
+          env:
+            - name: BENCHMARK_JOB_NAME
+              value: "__BENCHMARK_JOB_NAME__"
+            - name: MYSQL_HOST
+              value: "__STS_NAME__-0.__SERVICE_NAME__.__NAMESPACE__.svc.cluster.local"
+            - name: MYSQL_PORT
+              value: "3306"
+            - name: MYSQL_USER
+              value: "root"
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: __AUTH_SECRET__
+                  key: mysql-root-password
+            - name: MYSQL_BENCHMARK_CONCURRENCY
+              value: "__BENCHMARK_CONCURRENCY__"
+            - name: MYSQL_BENCHMARK_ITERATIONS
+              value: "__BENCHMARK_ITERATIONS__"
+            - name: MYSQL_BENCHMARK_QUERIES
+              value: "__BENCHMARK_QUERIES__"
+          volumeMounts:
+            - name: report-storage
+              mountPath: /report
+      volumes:
+        - name: report-storage
+          emptyDir: {}

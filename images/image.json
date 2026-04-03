@@ -1,0 +1,30 @@
+[
+  {
+    "arch": "amd64",
+    "platform": "linux/amd64",
+    "pull": "registry.cn-beijing.aliyuncs.com/kube4/mysql:8.0.45",
+    "tag": "sealos.hub:5000/kube4/mysql:8.0.45",
+    "tar": "mysql-amd64.tar"
+  },
+  {
+    "arch": "amd64",
+    "platform": "linux/amd64",
+    "pull": "registry.cn-beijing.aliyuncs.com/kube4/busybox:v1",
+    "tag": "sealos.hub:5000/kube4/busybox:v1",
+    "tar": "busybox-amd64.tar"
+  },
+  {
+    "arch": "arm64",
+    "platform": "linux/arm64",
+    "pull": "registry.cn-beijing.aliyuncs.com/kube4/mysql:8.0.45",
+    "tag": "sealos.hub:5000/kube4/mysql:8.0.45",
+    "tar": "mysql-arm64.tar"
+  },
+  {
+    "arch": "arm64",
+    "platform": "linux/arm64",
+    "pull": "registry.cn-beijing.aliyuncs.com/kube4/busybox:v1",
+    "tag": "sealos.hub:5000/kube4/busybox:v1",
+    "tar": "busybox-arm64.tar"
+  }
+]

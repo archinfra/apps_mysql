@@ -1,0 +1,242 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __BACKUP_SCRIPT_CONFIGMAP__
+data:
+  backup.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    wait_for_mysql() {
+      local retries=30
+      local delay=10
+      local attempt=1
+
+      while (( attempt <= retries )); do
+        if mysqladmin \
+          --host="${MYSQL_HOST}" \
+          --port="${MYSQL_PORT}" \
+          --protocol=TCP \
+          --user="${MYSQL_USER}" \
+          ping >/dev/null 2>&1; then
+          return 0
+        fi
+        echo "[WARN] mysql is not ready yet, retry ${attempt}/${retries}"
+        sleep "${delay}"
+        ((attempt++))
+      done
+
+      echo "[ERROR] mysql is not reachable"
+      exit 1
+    }
+
+    discover_user_databases() {
+      mysql \
+        --host="${MYSQL_HOST}" \
+        --port="${MYSQL_PORT}" \
+        --protocol=TCP \
+        --user="${MYSQL_USER}" \
+        -Nse "SHOW DATABASES" \
+        | grep -Ev '^(information_schema|performance_schema|mysql|sys)$' || true
+    }
+
+    prune_snapshots() {
+      local snapshot_dir="$1"
+      local retention="$2"
+      local snapshots=()
+
+      mapfile -t snapshots < <(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r)
+      if (( ${#snapshots[@]} <= retention )); then
+        return 0
+      fi
+
+      for snapshot in "${snapshots[@]:retention}"; do
+        rm -f "${snapshot_dir}/${snapshot}" \
+              "${snapshot_dir}/${snapshot}.sha256" \
+              "${snapshot_dir}/${snapshot%.sql.gz}.meta"
+      done
+    }
+
+    export MYSQL_PWD="${MYSQL_ROOT_PASSWORD}"
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    component_root="/backup/${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${STS_NAME}"
+    snapshot_dir="${component_root}/snapshots"
+    snapshot_file="${snapshot_dir}/${timestamp}.sql.gz"
+    tmp_file="${snapshot_file}.tmp"
+    checksum_file="${snapshot_file}.sha256"
+    meta_file="${snapshot_dir}/${timestamp}.meta"
+
+    mkdir -p "${snapshot_dir}"
+    wait_for_mysql
+
+    mapfile -t databases < <(discover_user_databases)
+
+    if (( ${#databases[@]} == 0 )); then
+      printf -- "-- mysql backup captured no user databases at %s\n" "${timestamp}" | gzip -c > "${tmp_file}"
+    else
+      mysqldump \
+        --host="${MYSQL_HOST}" \
+        --port="${MYSQL_PORT}" \
+        --protocol=TCP \
+        --user="${MYSQL_USER}" \
+        --single-transaction \
+        --quick \
+        --routines \
+        --events \
+        --triggers \
+        --hex-blob \
+        --set-gtid-purged=OFF \
+        --add-drop-database \
+        --databases "${databases[@]}" | gzip -c > "${tmp_file}"
+    fi
+
+    mv "${tmp_file}" "${snapshot_file}"
+    sha256sum "${snapshot_file}" > "${checksum_file}"
+
+    {
+      echo "snapshot=${timestamp}.sql.gz"
+      echo "component=mysql"
+      echo "namespace=${NAMESPACE}"
+      echo "statefulset=${STS_NAME}"
+      echo "host=${MYSQL_HOST}"
+      echo "databases=${databases[*]:-none}"
+      echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${meta_file}"
+
+    echo "${timestamp}.sql.gz" > "${component_root}/latest.txt"
+    prune_snapshots "${snapshot_dir}" "${BACKUP_RETENTION}"
+
+    echo "[INFO] mysql backup completed: ${snapshot_file}"
+  restore.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    wait_for_mysql() {
+      local retries=30
+      local delay=10
+      local attempt=1
+
+      while (( attempt <= retries )); do
+        if mysqladmin \
+          --host="${MYSQL_HOST}" \
+          --port="${MYSQL_PORT}" \
+          --protocol=TCP \
+          --user="${MYSQL_USER}" \
+          ping >/dev/null 2>&1; then
+          return 0
+        fi
+        echo "[WARN] mysql is not ready yet, retry ${attempt}/${retries}"
+        sleep "${delay}"
+        ((attempt++))
+      done
+
+      echo "[ERROR] mysql is not reachable"
+      exit 1
+    }
+
+    resolve_snapshot_file() {
+      local component_root="$1"
+      local snapshot_dir="$2"
+      local snapshot_name="${MYSQL_RESTORE_SNAPSHOT:-latest}"
+
+      if [[ "${snapshot_name}" == "latest" ]]; then
+        if [[ -f "${component_root}/latest.txt" ]]; then
+          snapshot_name="$(cat "${component_root}/latest.txt")"
+        else
+          snapshot_name="$(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r | head -n 1)"
+        fi
+      fi
+
+      [[ -n "${snapshot_name}" ]] || {
+        echo "[ERROR] no mysql snapshot found"
+        exit 1
+      }
+
+      if [[ "${snapshot_name}" != *.sql.gz ]]; then
+        snapshot_name="${snapshot_name}.sql.gz"
+      fi
+
+      echo "${snapshot_dir}/${snapshot_name}"
+    }
+
+    export MYSQL_PWD="${MYSQL_ROOT_PASSWORD}"
+    component_root="/backup/${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${STS_NAME}"
+    snapshot_dir="${component_root}/snapshots"
+    snapshot_file="$(resolve_snapshot_file "${component_root}" "${snapshot_dir}")"
+
+    [[ -f "${snapshot_file}" ]] || {
+      echo "[ERROR] mysql restore snapshot not found: ${snapshot_file}"
+      exit 1
+    }
+
+    checksum_file="${snapshot_file}.sha256"
+
+    [[ ! -f "${checksum_file}" ]] || sha256sum -c "${checksum_file}"
+
+    wait_for_mysql
+
+    gunzip -c "${snapshot_file}" | mysql \
+      --host="${MYSQL_HOST}" \
+      --port="${MYSQL_PORT}" \
+      --protocol=TCP \
+      --user="${MYSQL_USER}"
+
+    echo "[INFO] mysql restore completed from ${snapshot_file}"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: __BACKUP_CRONJOB_NAME__
+spec:
+  schedule: "__BACKUP_SCHEDULE__"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: mysql-backup
+              image: __MYSQL_IMAGE__
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - /scripts/backup.sh
+              env:
+                - name: NAMESPACE
+                  value: "__NAMESPACE__"
+                - name: STS_NAME
+                  value: "__STS_NAME__"
+                - name: MYSQL_HOST
+                  value: "__STS_NAME__-0.__SERVICE_NAME__.__NAMESPACE__.svc.cluster.local"
+                - name: MYSQL_PORT
+                  value: "3306"
+                - name: MYSQL_USER
+                  value: "root"
+                - name: MYSQL_ROOT_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: __AUTH_SECRET__
+                      key: mysql-root-password
+                - name: BACKUP_ROOT_DIR
+                  value: "__BACKUP_ROOT_DIR__"
+                - name: BACKUP_RETENTION
+                  value: "__BACKUP_RETENTION__"
+              volumeMounts:
+                - name: backup-scripts
+                  mountPath: /scripts
+                - name: backup-storage
+                  mountPath: /backup
+          volumes:
+            - name: backup-scripts
+              configMap:
+                name: __BACKUP_SCRIPT_CONFIGMAP__
+                defaultMode: 0755
+            - name: backup-storage
+              nfs:
+                server: __BACKUP_NFS_SERVER__
+                path: __BACKUP_NFS_PATH__
