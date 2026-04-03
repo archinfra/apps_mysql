@@ -13,68 +13,44 @@ metadata:
 data:
   livenessprobe.sh: |
     #!/bin/sh
-    # Liveness probe: 检查 MySQL 是否存活
-    MYSQL_SOCKET=/var/run/mysqld/mysqld.sock
-    
-    # Insert 1 success every this amount of failures
-    # (assumes successThreshold is > 1)
-    max_failures_during_progress=$1
-    
-    # Ping the server using socket
     mysqladmin -h localhost -umysqlhealthchecker -p'health@passw0rd' ping
-    
-    # If it's up, we succeed
+
     if [ $? -eq 0 ]; then
       exit 0
     fi
-    
-    if [ -z $max_failures_during_progress ]; then
+
+    max_failures_during_progress=$1
+    if [ -z "$max_failures_during_progress" ]; then
       exit 1
     fi
-    
-    # If the init/startup/InnoDB recovery is still ongoing, we're
-    # not succeeded nor failed yet, so keep failing and getting time
-    # extensions until it succeeds.
-    # We currently rely on the server to exit/abort if the init/startup fails,
-    # but ideally there would be a way to check whether the server is
-    # still making progress and not just stuck waiting on a frozen networked
-    # volume, for example.
-    
+
     if [ -f /tmp/fail-counter ]; then
       fail_count=$(($(cat /tmp/fail-counter) + 1))
     else
       fail_count=1
-    fi    
-    
-    if [ $fail_count -gt $max_failures_during_progress ]; then
-      # Report success to reset the failure counter upstream and get
-      # a time extension
+    fi
+
+    if [ "$fail_count" -gt "$max_failures_during_progress" ]; then
       rm -f /tmp/fail-counter
       exit 0
-    else
-      # Update the failure counter and fail out
-      echo $fail_count > /tmp/fail-counter
-      exit 1
-    fi   
+    fi
+
+    echo "$fail_count" > /tmp/fail-counter
+    exit 1
 
   readinessprobe.sh: |
     #!/bin/sh
 
-    # Socket path for MySQL
-    MYSQL_SOCKET=/var/run/mysqld/mysqld.sock
-
-    # Once the container is ready, it's always ready.
     if [ -f /tmp/mysql-ready ]; then
       exit 0
     fi
-    
-    # Ping server using socket to see if it is ready
+
     if mysqladmin -h localhost -umysqlhealthchecker -p'health@passw0rd' ping; then
       touch /tmp/mysql-ready
       exit 0
-    else
-      exit 1
     fi
+
+    exit 1
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -83,61 +59,101 @@ metadata:
 data:
   init-users.sql: |
     set sql_log_bin=0;
-    
-    # Create socket authenticated localroot@localhost account
+
     DROP USER IF EXISTS localroot@localhost;
     CREATE USER IF NOT EXISTS 'localroot'@'localhost' IDENTIFIED BY 'local@paasw0rd';
     GRANT ALL ON *.* TO 'localroot'@'localhost' WITH GRANT OPTION;
     GRANT PROXY ON ''@'' TO localroot@localhost WITH GRANT OPTION;
-            
-    # Drop the default account created by the docker image      
+
     DROP USER IF EXISTS mysqlhealthchecker@localhost;
-    # Create account for liveness probe
     CREATE USER mysqlhealthchecker@localhost IDENTIFIED BY 'health@passw0rd';
     GRANT USAGE ON *.* TO 'mysqlhealthchecker'@'localhost';
-  
-    # Additional users for replication
+
     set sql_log_bin=1;
     CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED BY 'repl@passw0rd';
     GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
     CREATE USER IF NOT EXISTS 'orch'@'%' IDENTIFIED BY 'orch@passw0rd';
     GRANT PROCESS, REPLICATION CLIENT, RELOAD ON *.* TO 'orch'@'%';
     FLUSH PRIVILEGES;
-
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: __MYSQL_CONFIGMAP__
 data:
-  # 将原有的00-basic.cnf、01-group_replication.cnf合并到my.cnf中
   my.cnf: |
     [mysqld]
-    # 基础配置
     plugin_load_add=auth_socket.so
     loose_auth_socket=FORCE_PLUS_PERMANENT
-    skip_log_error
     log_error_verbosity=3
     local-infile=1
     socket=/var/run/mysqld/mysqld.sock
     mysqlx_socket=/var/run/mysqld/mysqlx.sock
-    
-    # 复制相关配置
+#__FEATURE_FLUENTBIT_START__
+    log_error=/var/log/mysql/error.log
+    slow_query_log=ON
+    slow_query_log_file=/var/log/mysql/slow.log
+    long_query_time=__MYSQL_SLOW_QUERY_TIME__
+    log_queries_not_using_indexes=ON
+#__FEATURE_FLUENTBIT_END__
+
     log_bin=mycluster
     enforce_gtid_consistency=ON
     gtid_mode=ON
     relay_log_info_repository=TABLE
-    skip_slave_start=1  
+    skip_slave_start=1
     loose_group_replication_recovery_use_ssl=1
-    
+
     datadir=/var/lib/mysql
     !includedir /etc/mysql/conf.d
-    
+
     [mysql]
     socket=/var/run/mysqld/mysqld.sock
-    
+
     [mysqladmin]
     socket=/var/run/mysqld/mysqld.sock
+---
+#__FEATURE_FLUENTBIT_START__
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __FLUENTBIT_CONFIGMAP__
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush 1
+        Daemon Off
+        Log_Level info
+
+    [INPUT]
+        Name tail
+        Tag mysql.error
+        Path /var/log/mysql/error.log
+        DB /tmp/mysql-error.db
+        Read_from_Head true
+        Refresh_Interval 5
+        Skip_Long_Lines On
+
+    [INPUT]
+        Name tail
+        Tag mysql.slow
+        Path /var/log/mysql/slow.log
+        DB /tmp/mysql-slow.db
+        Read_from_Head true
+        Refresh_Interval 5
+        Skip_Long_Lines On
+
+    [FILTER]
+        Name modify
+        Match mysql.*
+        Add namespace __NAMESPACE__
+        Add statefulset __STS_NAME__
+        Add app __APP_NAME__
+
+    [OUTPUT]
+        Name stdout
+        Match *
+#__FEATURE_FLUENTBIT_END__
 ---
 apiVersion: v1
 kind: Service
@@ -149,7 +165,45 @@ spec:
     app: __APP_NAME__
   ports:
     - port: 3306
-
+---
+#__FEATURE_MONITORING_START__
+apiVersion: v1
+kind: Service
+metadata:
+  name: __METRICS_SERVICE_NAME__
+  labels:
+    app: __APP_NAME__
+    metrics: "enabled"
+spec:
+  selector:
+    app: __APP_NAME__
+  ports:
+    - name: metrics
+      port: __METRICS_PORT__
+      targetPort: metrics
+#__FEATURE_MONITORING_END__
+---
+#__FEATURE_SERVICE_MONITOR_START__
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: __SERVICE_MONITOR_NAME__
+  labels:
+    app: __APP_NAME__
+spec:
+  namespaceSelector:
+    matchNames:
+      - __NAMESPACE__
+  selector:
+    matchLabels:
+      app: __APP_NAME__
+      metrics: "enabled"
+  endpoints:
+    - port: metrics
+      interval: __SERVICE_MONITOR_INTERVAL__
+      scrapeTimeout: __SERVICE_MONITOR_SCRAPE_TIMEOUT__
+      path: /metrics
+#__FEATURE_SERVICE_MONITOR_END__
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -173,12 +227,8 @@ spec:
             - sh
             - -c
             - |
-              # 从主机名中提取数字序号 (例如 mysql-0 提取出 0)
-              # 然后加 100，确保 ID 是正整数
               hostname=$(hostname)
-              # 使用参数扩展提取最后一个 - 后的数字
               ordinal="${hostname##*-}"
-              # 验证是否是数字
               if ! echo "$ordinal" | grep -qE '^[0-9]+$'; then
                 echo "Failed to extract ordinal from hostname: $hostname"
                 exit 1
@@ -187,9 +237,17 @@ spec:
               echo "[mysqld]" > /mnt/conf.d/server-id.cnf
               echo "server-id=$server_id" >> /mnt/conf.d/server-id.cnf
               echo "report_host=$(hostname)" >> /mnt/conf.d/server-id.cnf
+#__FEATURE_FLUENTBIT_START__
+              mkdir -p /mnt/mysql-log
+              chmod 0777 /mnt/mysql-log
+#__FEATURE_FLUENTBIT_END__
           volumeMounts:
-            - name: conf-dynamic  # 挂载到一个空的共享卷
+            - name: conf-dynamic
               mountPath: /mnt/conf.d
+#__FEATURE_FLUENTBIT_START__
+            - name: mysql-log
+              mountPath: /mnt/mysql-log
+#__FEATURE_FLUENTBIT_END__
       containers:
         - name: mysql
           image: __MYSQL_IMAGE__
@@ -209,14 +267,17 @@ spec:
             - name: config
               mountPath: /etc/my.cnf
               subPath: my.cnf
-            - name: conf-dynamic   # 挂载 initContainer 生成的唯一 ID
+            - name: conf-dynamic
               mountPath: /etc/mysql/conf.d/server-id.cnf
               subPath: server-id.cnf
             - name: socket-dir
               mountPath: /var/run/mysqld
             - name: probes
               mountPath: /usr/local/bin/probes
-          # 使用socket认证的探针
+#__FEATURE_FLUENTBIT_START__
+            - name: mysql-log
+              mountPath: /var/log/mysql
+#__FEATURE_FLUENTBIT_END__
           livenessProbe:
             exec:
               command:
@@ -243,6 +304,59 @@ spec:
             limits:
               cpu: "1"
               memory: 2Gi
+#__FEATURE_MONITORING_START__
+        - name: mysqld-exporter
+          image: __MYSQL_EXPORTER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              cat > /tmp/exporter.cnf <<EOF
+              [client]
+              user=root
+              password=${MYSQL_ROOT_PASSWORD}
+              host=127.0.0.1
+              port=3306
+              EOF
+              exec /bin/mysqld_exporter --config.my-cnf=/tmp/exporter.cnf
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: __AUTH_SECRET__
+                  key: mysql-root-password
+          ports:
+            - name: metrics
+              containerPort: __METRICS_PORT__
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+#__FEATURE_MONITORING_END__
+#__FEATURE_FLUENTBIT_START__
+        - name: fluent-bit
+          image: __FLUENTBIT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - /fluent-bit/etc/fluent-bit.conf
+          volumeMounts:
+            - name: mysql-log
+              mountPath: /var/log/mysql
+            - name: fluent-bit-config
+              mountPath: /fluent-bit/etc
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+#__FEATURE_FLUENTBIT_END__
       volumes:
         - name: init-users
           configMap:
@@ -257,10 +371,17 @@ spec:
           configMap:
             name: __PROBE_CONFIGMAP__
             defaultMode: 0755
+#__FEATURE_FLUENTBIT_START__
+        - name: fluent-bit-config
+          configMap:
+            name: __FLUENTBIT_CONFIGMAP__
+        - name: mysql-log
+          emptyDir: {}
+#__FEATURE_FLUENTBIT_END__
         - name: conf-dynamic
-          emptyDir: { }
+          emptyDir: {}
         - name: socket-dir
-          emptyDir: { }
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -271,7 +392,6 @@ spec:
           requests:
             storage: __STORAGE_SIZE__
 ---
-# ClusterIP 服务（用于统一入口）
 apiVersion: v1
 kind: Service
 metadata:
@@ -284,4 +404,3 @@ spec:
     - port: 3306
       targetPort: 3306
       nodePort: __NODE_PORT__
-

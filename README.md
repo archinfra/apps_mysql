@@ -1,27 +1,34 @@
 # apps_mysql
 
-Offline MySQL installer for Kubernetes with built-in backup, restore, and benchmark workflows.
+面向 Kubernetes 的 MySQL 离线安装包，支持离线构建、状态对齐安装、NFS/S3 双备份后端、恢复校验、监控、日志采集和内置压测。
 
-## What It Includes
+## 你最先需要知道的事
 
-- Offline `.run` installer build for `amd64` and `arm64`
-- StatefulSet-based MySQL deployment
-- Built-in backup CronJob and manual backup trigger
-- Restore job generation from saved snapshots
-- Backup/restore verification workflow
-- Offline benchmark workflow with report export
+1. `install` 不是一次性脚本，而是“声明式对齐”动作。
+2. 默认开启监控、ServiceMonitor、Fluent Bit、备份和压测能力。
+3. 如果集群没有 `ServiceMonitor` CRD，安装会继续，只跳过该资源。
+4. 默认不会删除 PVC，所以同 `namespace + sts-name` 的重装通常可以复用原数据。
+5. 备份后端支持 `nfs` 和 `s3`。
 
-## Project Layout
+## 目录结构
 
 ```text
 .
 |-- build.sh
 |-- install.sh
 |-- images/
-`-- manifests/
+|-- manifests/
+`-- docs/
 ```
 
-## Build
+## 详细文档
+
+- [中文架构解析](docs/ARCHITECTURE.zh-CN.md)
+- [中文使用场景](docs/USE-CASES.zh-CN.md)
+- [中文测试说明](docs/TESTING.zh-CN.md)
+- [设计决策与方案文档](docs/plans/2026-04-03-mysql-installer-architecture-design.md)
+
+## 构建
 
 ```bash
 chmod +x build.sh install.sh
@@ -30,7 +37,7 @@ chmod +x build.sh install.sh
 ./build.sh --arch all
 ```
 
-Artifacts:
+构建产物:
 
 ```text
 dist/mysql-installer-amd64.run
@@ -39,73 +46,84 @@ dist/mysql-installer-arm64.run
 dist/mysql-installer-arm64.run.sha256
 ```
 
-## Install
+## 安装示例
 
-Minimal install:
+NFS 备份:
 
 ```bash
 ./dist/mysql-installer-amd64.run install \
   --namespace mysql-demo \
   --root-password 'StrongPassw0rd' \
+  --backup-backend nfs \
   --backup-nfs-server 192.168.10.2 \
   -y
 ```
 
-If `--backup-nfs-server` is omitted, the installer prompts for it when the action needs backup storage. `--backup-nfs-path` defaults to `/data/nfs-share`.
-
-Storage note:
-
-- The MySQL StatefulSet expects a usable `StorageClass`
-- The default is `nfs`
-- In our test environment this is provided by the `apps_nfs-provisioner` package
-
-## Backup
-
-Manual backup:
+S3 备份:
 
 ```bash
-./dist/mysql-installer-amd64.run backup \
+./dist/mysql-installer-amd64.run install \
   --namespace mysql-demo \
+  --root-password 'StrongPassw0rd' \
+  --backup-backend s3 \
+  --s3-endpoint https://minio.example.com \
+  --s3-bucket mysql-backup \
+  --s3-prefix prod \
+  --s3-access-key <AK> \
+  --s3-secret-key <SK> \
+  -y
+```
+
+按需关闭部分能力:
+
+```bash
+./dist/mysql-installer-amd64.run install \
+  --namespace mysql-demo \
+  --root-password 'StrongPassw0rd' \
+  --backup-backend nfs \
   --backup-nfs-server 192.168.10.2 \
+  --disable-service-monitor \
+  --disable-fluentbit \
   -y
 ```
 
-Restore latest snapshot:
+## 核心参数
 
-```bash
-./dist/mysql-installer-amd64.run restore \
-  --namespace mysql-demo \
-  --backup-nfs-server 192.168.10.2 \
-  --restore-snapshot latest \
-  -y
-```
+常用基础参数:
 
-Verify backup and restore:
+- `-n, --namespace`
+- `--root-password`
+- `--mysql-replicas`
+- `--storage-class`
+- `--storage-size`
+- `--sts-name`
+- `--service-name`
+- `--node-port`
 
-```bash
-./dist/mysql-installer-amd64.run verify-backup-restore \
-  --namespace mysql-demo \
-  --backup-nfs-server 192.168.10.2 \
-  -y
-```
+能力开关:
 
-## Benchmark
+- `--enable-monitoring` / `--disable-monitoring`
+- `--enable-service-monitor` / `--disable-service-monitor`
+- `--enable-fluentbit` / `--disable-fluentbit`
+- `--enable-backup` / `--disable-backup`
+- `--enable-benchmark` / `--disable-benchmark`
 
-Run an offline benchmark and export a report:
+备份参数:
 
-```bash
-./dist/mysql-installer-amd64.run benchmark \
-  --namespace mysql-demo \
-  --benchmark-concurrency 32 \
-  --benchmark-iterations 3 \
-  --benchmark-queries 2000 \
-  --report-dir ./mysql-reports \
-  -y
-```
+- `--backup-backend nfs|s3`
+- `--backup-nfs-server`
+- `--backup-nfs-path`
+- `--backup-root-dir`
+- `--backup-schedule`
+- `--backup-retention`
+- `--s3-endpoint`
+- `--s3-bucket`
+- `--s3-prefix`
+- `--s3-access-key`
+- `--s3-secret-key`
+- `--s3-insecure`
 
-The script runs a built-in concurrent SQL benchmark, waits for the job, downloads the logs, and writes a report file to `./mysql-reports` by default.
-
-## Default Runtime Values
+## 运行默认值
 
 - namespace: `aict`
 - replicas: `1`
@@ -114,4 +132,19 @@ The script runs a built-in concurrent SQL benchmark, waits for the job, download
 - service name: `mysql`
 - nodePort service name: `mysql-nodeport`
 - nodePort: `30306`
-- backup NFS path: `/data/nfs-share`
+- backup backend: `nfs`
+- backup nfs path: `/data/nfs-share`
+- backup root dir: `backups`
+- backup retention: `5`
+- monitoring exporter: `enabled`
+- service monitor: `enabled`
+- fluent-bit: `enabled`
+- benchmark action: `enabled`
+
+## 关键运行规则
+
+1. `install` 可以重复执行，用于补开或关闭能力。
+2. `--disable-monitoring` 会自动关闭 `ServiceMonitor`。
+3. `ServiceMonitor` 只在集群已安装 CRD 时创建。
+4. 卸载默认保留 PVC，只有 `uninstall --delete-pvc` 才会删除。
+5. 若想重装复用数据，保持 `namespace` 和 `--sts-name` 不变。

@@ -8,6 +8,47 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      #__BACKUP_S3_START__
+      initContainers:
+        - name: s3-download
+          image: __S3_CLIENT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /scripts/s3-download.sh
+          env:
+            - name: NAMESPACE
+              value: "__NAMESPACE__"
+            - name: STS_NAME
+              value: "__STS_NAME__"
+            - name: BACKUP_ROOT_DIR
+              value: "__BACKUP_ROOT_DIR__"
+            - name: BACKUP_BASE_DIR
+              value: "/workspace/restore"
+            - name: S3_ENDPOINT
+              value: "__S3_ENDPOINT__"
+            - name: S3_BUCKET
+              value: "__S3_BUCKET__"
+            - name: S3_PREFIX
+              value: "__S3_PREFIX__"
+            - name: S3_INSECURE
+              value: "__S3_INSECURE__"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __BACKUP_STORAGE_SECRET__
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __BACKUP_STORAGE_SECRET__
+                  key: s3-secret-key
+          volumeMounts:
+            - name: backup-scripts
+              mountPath: /scripts
+            - name: restore-staging
+              mountPath: /workspace/restore
+      #__BACKUP_S3_END__
       containers:
         - name: mysql-restore
           image: __MYSQL_IMAGE__
@@ -35,17 +76,37 @@ spec:
               value: "__BACKUP_ROOT_DIR__"
             - name: MYSQL_RESTORE_SNAPSHOT
               value: "__RESTORE_SNAPSHOT__"
+            #__BACKUP_NFS_START__
+            - name: BACKUP_BASE_DIR
+              value: "/backup"
+            #__BACKUP_NFS_END__
+            #__BACKUP_S3_START__
+            - name: BACKUP_BASE_DIR
+              value: "/workspace/restore"
+            #__BACKUP_S3_END__
           volumeMounts:
             - name: backup-scripts
               mountPath: /scripts
+            #__BACKUP_NFS_START__
             - name: backup-storage
               mountPath: /backup
+            #__BACKUP_NFS_END__
+            #__BACKUP_S3_START__
+            - name: restore-staging
+              mountPath: /workspace/restore
+            #__BACKUP_S3_END__
       volumes:
         - name: backup-scripts
           configMap:
             name: __BACKUP_SCRIPT_CONFIGMAP__
             defaultMode: 0755
+        #__BACKUP_NFS_START__
         - name: backup-storage
           nfs:
             server: __BACKUP_NFS_SERVER__
             path: __BACKUP_NFS_PATH__
+        #__BACKUP_NFS_END__
+        #__BACKUP_S3_START__
+        - name: restore-staging
+          emptyDir: {}
+        #__BACKUP_S3_END__
