@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: __ADDON_EXPORTER_SECRET__
+  labels:
+    app: __APP_NAME__
+    addon.mysql.io/type: monitoring
+type: Opaque
+stringData:
+  .my.cnf: |
+    [client]
+    user=__ADDON_EXPORTER_USERNAME__
+    password=__ADDON_EXPORTER_PASSWORD__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __ADDON_EXPORTER_DEPLOYMENT_NAME__
+  labels:
+    app: __APP_NAME__
+    addon.mysql.io/type: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: __APP_NAME__
+      addon.mysql.io/type: monitoring
+  template:
+    metadata:
+      labels:
+        app: __APP_NAME__
+        addon.mysql.io/type: monitoring
+    spec:
+      containers:
+        - name: mysqld-exporter
+          image: __MYSQL_EXPORTER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config.my-cnf=/etc/mysql-exporter/.my.cnf"
+            - "--mysqld.address=__ADDON_MONITORING_TARGET__"
+          ports:
+            - name: metrics
+              containerPort: __METRICS_PORT__
+          volumeMounts:
+            - name: exporter-auth
+              mountPath: /etc/mysql-exporter
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: exporter-auth
+          secret:
+            secretName: __ADDON_EXPORTER_SECRET__
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: __ADDON_EXPORTER_SERVICE_NAME__
+  labels:
+    app: __APP_NAME__
+    metrics: "enabled"
+    addon.mysql.io/type: monitoring
+spec:
+  selector:
+    app: __APP_NAME__
+    addon.mysql.io/type: monitoring
+  ports:
+    - name: metrics
+      port: __METRICS_PORT__
+      targetPort: metrics
+---
+#__FEATURE_SERVICE_MONITOR_START__
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: __ADDON_SERVICE_MONITOR_NAME__
+  labels:
+    app: __APP_NAME__
+    addon.mysql.io/type: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - __NAMESPACE__
+  selector:
+    matchLabels:
+      app: __APP_NAME__
+      addon.mysql.io/type: monitoring
+  endpoints:
+    - port: metrics
+      interval: __SERVICE_MONITOR_INTERVAL__
+      scrapeTimeout: __SERVICE_MONITOR_SCRAPE_TIMEOUT__
+      path: /metrics
+#__FEATURE_SERVICE_MONITOR_END__

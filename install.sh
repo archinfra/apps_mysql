@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.4.0"
+APP_VERSION="1.5.0"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
 MANIFEST_DIR="${WORKDIR}/manifests"
@@ -13,6 +13,7 @@ MYSQL_MANIFEST="${MANIFEST_DIR}/innodb-mysql.yaml"
 BACKUP_MANIFEST="${MANIFEST_DIR}/mysql-backup.yaml"
 RESTORE_MANIFEST="${MANIFEST_DIR}/mysql-restore-job.yaml"
 BENCHMARK_MANIFEST="${MANIFEST_DIR}/mysql-benchmark-job.yaml"
+MONITORING_ADDON_MANIFEST="${MANIFEST_DIR}/mysql-addon-monitoring.yaml"
 
 REGISTRY_ADDR="${REGISTRY_ADDR:-sealos.hub:5000}"
 REGISTRY_USER="${REGISTRY_USER:-admin}"
@@ -20,6 +21,7 @@ REGISTRY_PASS="${REGISTRY_PASS:-passw0rd}"
 
 ACTION="install"
 HELP_TOPIC="overview"
+ADDONS=""
 NAMESPACE="aict"
 MYSQL_REPLICAS="1"
 MYSQL_ROOT_PASSWORD="passw0rd"
@@ -47,6 +49,13 @@ METRICS_PORT="9104"
 SERVICE_MONITOR_NAME="mysql-monitor"
 SERVICE_MONITOR_INTERVAL="30s"
 SERVICE_MONITOR_SCRAPE_TIMEOUT="10s"
+ADDON_EXPORTER_DEPLOYMENT_NAME="mysql-exporter"
+ADDON_EXPORTER_SERVICE_NAME="mysql-exporter"
+ADDON_EXPORTER_SECRET="mysql-exporter-auth"
+ADDON_EXPORTER_USERNAME="mysqld_exporter"
+ADDON_EXPORTER_PASSWORD="exporter@passw0rd"
+ADDON_MONITORING_TARGET=""
+ADDON_SERVICE_MONITOR_NAME="mysql-exporter-monitor"
 FLUENTBIT_CONFIGMAP="mysql-fluent-bit"
 MYSQL_SLOW_QUERY_TIME="2"
 BACKUP_NFS_SERVER=""
@@ -123,9 +132,12 @@ show_help_overview() {
   ./mysql-installer.run help [主题]
 
 动作:
-  install                 安装或对齐 MySQL 资源
+  install                 安装或整套对齐 MySQL 资源
   uninstall               卸载资源，默认保留 PVC
   status                  查看当前状态
+  addon-install           给已有 MySQL 单独补齐 addon 能力
+  addon-uninstall         单独移除 addon 能力
+  addon-status            查看 addon 能力状态与影响边界
   backup                  执行一次手工备份
   restore                 按快照恢复
   verify-backup-restore   执行备份恢复闭环校验
@@ -135,9 +147,11 @@ show_help_overview() {
 help 主题:
   overview        总览
   install         安装、重复执行和开关策略
+  addons          单独补齐能力的用法
   backup          NFS / S3 备份说明
   restore         恢复与重装复用说明
   benchmark       压测说明
+  logging         日志采集模式设计
   architecture    架构设计和边界
   examples        常见示例
 
@@ -153,12 +167,12 @@ EOF
 
 show_help_install() {
   cat <<'EOF'
-install 是“声明式对齐”动作，不只是首次安装。
+install 是“声明式整套对齐”动作，不只是首次安装。
 
 它适合:
   1. 首次安装
   2. 修改配置后再次执行
-  3. 后补安装监控或日志采集 sidecar
+  3. 允许滚动更新时补齐 sidecar 型能力
   4. 在不删除 PVC 的情况下重装并复用数据
 
 常用参数:
@@ -181,11 +195,53 @@ install 是“声明式对齐”动作，不只是首次安装。
   --enable-backup / --disable-backup
   --enable-benchmark / --disable-benchmark
 
+业务影响边界:
+  1. install 会对 StatefulSet 做整套对齐
+  2. 若 exporter sidecar / Fluent Bit sidecar / MySQL 配置发生变化，可能触发滚动更新
+  3. 若你只是想额外补监控 Deployment / 备份 CronJob，优先使用 addon-install
+
 PVC 复用条件:
   1. 卸载时没有加 --delete-pvc
   2. namespace 不变
   3. --sts-name 不变
   4. volumeClaimTemplates 仍然使用 data 作为卷名
+EOF
+}
+
+show_help_addons() {
+  cat <<'EOF'
+addon-install / addon-uninstall / addon-status 面向“已有 MySQL 补齐能力”场景。
+
+当前 addon 路径默认只做“无业务中断”的外置能力:
+  --addons monitoring
+      安装外置 mysqld-exporter Deployment + Service
+      额外新增 Pod，不修改 MySQL StatefulSet
+
+  --addons service-monitor
+      安装 ServiceMonitor 声明
+      会自动依赖 monitoring
+
+  --addons backup
+      安装备份 CronJob / ConfigMap / Secret
+      不重启 MySQL Pod
+
+命令示例:
+  ./mysql-installer.run addon-install \
+    --namespace mysql-demo \
+    --addons monitoring,service-monitor \
+    -y
+
+  ./mysql-installer.run addon-install \
+    --namespace mysql-demo \
+    --addons backup \
+    --backup-backend nfs \
+    --backup-nfs-server 192.168.10.2 \
+    -y
+
+说明:
+  1. addon 路径默认不处理日志 sidecar，因为它会改 StatefulSet 并触发滚动更新
+  2. 如果你计划建设 DaemonSet Fluent Bit + ES，日志推荐交给平台层统一处理
+  3. 如果确实需要 slow log 文件级采集，再用 install --enable-fluentbit 走嵌入式路径
 EOF
 }
 
@@ -248,11 +304,32 @@ EOF
 show_help_architecture() {
   cat <<'EOF'
 架构边界:
-  1. mysqld-exporter 采用 sidecar，便于与数据库实例同生命周期管理
-  2. ServiceMonitor 只做“声明”，不在本安装器内强制安装 Prometheus Operator
-  3. Fluent Bit 默认采用 sidecar，方便直接采集 MySQL error / slow log
-  4. 如果集群没有 ServiceMonitor CRD，安装继续，仅跳过该资源
-  5. 若后期补装 Prometheus Operator，可再次执行 install 进行补齐
+  1. install 负责“整套实例对齐”，允许使用 sidecar 型能力
+  2. addon-install 负责“无业务中断补齐能力”，优先新增外置 Pod / CronJob / CRD 资源
+  3. ServiceMonitor 只做“声明”，不在本安装器内强制安装 Prometheus Operator
+  4. 日志平台推荐做成 DaemonSet Fluent Bit + ES 等集群公共组件，不和数据库安装器耦死
+  5. 如果集群没有 ServiceMonitor CRD，安装继续，仅跳过该资源
+  6. 若确实需要 slow log 文件级采集，可继续走 install --enable-fluentbit，但要接受滚动更新
+EOF
+}
+
+show_help_logging() {
+  cat <<'EOF'
+日志采集建议分两层理解:
+
+推荐路径: 平台级 DaemonSet 日志体系
+  1. 由统一的 Fluent Bit / Vector / Filebeat DaemonSet 采集容器日志
+  2. MySQL 安装器不负责代装整套 ES / OpenSearch / Loki
+  3. 这种模式平台边界清晰，适合你现在规划的 Fluent Bit + ES 体系
+
+兼容路径: MySQL 内嵌 Fluent Bit sidecar
+  1. 适合必须直接读取容器内 slow log / error log 文件的场景
+  2. 通过 install --enable-fluentbit 开启
+  3. 会修改 StatefulSet 模板，可能触发滚动更新
+
+结论:
+  如果你已经打算建设 DaemonSet 级日志平台，默认不需要再做 sidecar。
+  只有在“必须抓取 MySQL 容器内文件日志、且平台层拿不到这些日志”时，才建议保留 sidecar。
 EOF
 }
 
@@ -266,7 +343,7 @@ NFS 备份安装:
     --backup-nfs-server 192.168.10.2 \
     -y
 
-S3 备份安装:
+  S3 备份安装:
   ./mysql-installer.run install \
     --namespace mysql-demo \
     --root-password 'StrongPassw0rd' \
@@ -275,6 +352,20 @@ S3 备份安装:
     --s3-bucket mysql-backup \
     --s3-access-key <AK> \
     --s3-secret-key <SK> \
+    -y
+
+已有 MySQL 补齐监控 addon:
+  ./mysql-installer.run addon-install \
+    --namespace mysql-demo \
+    --addons monitoring,service-monitor \
+    -y
+
+已有 MySQL 补齐备份 addon:
+  ./mysql-installer.run addon-install \
+    --namespace mysql-demo \
+    --addons backup \
+    --backup-backend nfs \
+    --backup-nfs-server 192.168.10.2 \
     -y
 EOF
 }
@@ -287,6 +378,9 @@ show_help() {
     install)
       show_help_install
       ;;
+    addons)
+      show_help_addons
+      ;;
     backup)
       show_help_backup
       ;;
@@ -295,6 +389,9 @@ show_help() {
       ;;
     benchmark)
       show_help_benchmark
+      ;;
+    logging)
+      show_help_logging
       ;;
     architecture)
       show_help_architecture
@@ -336,11 +433,11 @@ parse_args() {
   esac
 
   while [[ $# -gt 0 ]]; do
-    case "$1" in
-      install|uninstall|status|backup|restore|verify-backup-restore|benchmark)
-        ACTION="$1"
-        shift
-        ;;
+      case "$1" in
+        install|uninstall|status|addon-install|addon-uninstall|addon-status|backup|restore|verify-backup-restore|benchmark)
+          ACTION="$1"
+          shift
+          ;;
       -n|--namespace)
         NAMESPACE="$2"
         shift 2
@@ -361,14 +458,18 @@ parse_args() {
         MYSQL_ROOT_PASSWORD="$2"
         shift 2
         ;;
-      --service-name)
-        SERVICE_NAME="$2"
-        shift 2
-        ;;
-      --sts-name)
-        STS_NAME="$2"
-        shift 2
-        ;;
+        --service-name)
+          SERVICE_NAME="$2"
+          shift 2
+          ;;
+        --addons)
+          ADDONS="$2"
+          shift 2
+          ;;
+        --sts-name)
+          STS_NAME="$2"
+          shift 2
+          ;;
       --nodeport-service-name)
         NODEPORT_SERVICE_NAME="$2"
         shift 2
@@ -461,18 +562,30 @@ parse_args() {
         S3_ACCESS_KEY="$2"
         shift 2
         ;;
-      --s3-secret-key)
-        S3_SECRET_KEY="$2"
-        shift 2
-        ;;
-      --s3-insecure)
-        S3_INSECURE="true"
-        shift
-        ;;
-      --restore-snapshot)
-        RESTORE_SNAPSHOT="$2"
-        shift 2
-        ;;
+        --s3-secret-key)
+          S3_SECRET_KEY="$2"
+          shift 2
+          ;;
+        --s3-insecure)
+          S3_INSECURE="true"
+          shift
+          ;;
+        --exporter-user)
+          ADDON_EXPORTER_USERNAME="$2"
+          shift 2
+          ;;
+        --exporter-password)
+          ADDON_EXPORTER_PASSWORD="$2"
+          shift 2
+          ;;
+        --monitoring-target)
+          ADDON_MONITORING_TARGET="$2"
+          shift 2
+          ;;
+        --restore-snapshot)
+          RESTORE_SNAPSHOT="$2"
+          shift 2
+          ;;
       --wait-timeout)
         WAIT_TIMEOUT="$2"
         shift 2
@@ -510,9 +623,57 @@ parse_args() {
         ;;
     esac
   done
+  }
+
+normalize_addons() {
+  local raw="${ADDONS:-}"
+  local normalized=()
+  local item trimmed
+
+  [[ -n "${raw}" ]] || die "动作 ${ACTION} 需要提供 --addons，示例: --addons monitoring,backup"
+
+  if [[ "${raw}" == "all" ]]; then
+    raw="monitoring,service-monitor,backup"
+  fi
+
+  IFS=',' read -r -a items <<<"${raw}"
+  for item in "${items[@]}"; do
+    trimmed="$(echo "${item}" | awk '{$1=$1; print}')"
+    [[ -n "${trimmed}" ]] || continue
+
+    case "${trimmed}" in
+      monitoring|service-monitor|backup)
+        local exists="false"
+        local current
+        for current in "${normalized[@]}"; do
+          if [[ "${current}" == "${trimmed}" ]]; then
+            exists="true"
+            break
+          fi
+        done
+        [[ "${exists}" == "true" ]] || normalized+=("${trimmed}")
+        ;;
+      *)
+        die "不支持的 addon: ${trimmed}，当前仅支持 monitoring, service-monitor, backup"
+        ;;
+    esac
+  done
+
+  (( ${#normalized[@]} > 0 )) || die "--addons 未提供有效内容"
+  ADDONS="$(IFS=,; echo "${normalized[*]}")"
+}
+
+addon_selected() {
+  local addon_name="$1"
+  [[ ",${ADDONS}," == *",${addon_name},"* ]]
 }
 
 needs_backup_storage() {
+  if [[ "${ACTION}" == "addon-install" ]]; then
+    addon_selected backup && return 0
+    return 1
+  fi
+
   [[ "${BACKUP_ENABLED}" == "true" && ( "${ACTION}" == "install" || "${ACTION}" == "backup" || "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" ) ]]
 }
 
@@ -525,12 +686,43 @@ resolve_feature_dependencies() {
     warn "monitoring 已关闭，因此自动关闭 ServiceMonitor"
     SERVICE_MONITOR_ENABLED="false"
   fi
+
+  if [[ "${ACTION}" == "addon-install" || "${ACTION}" == "addon-uninstall" ]]; then
+    normalize_addons
+    SERVICE_MONITOR_ENABLED="false"
+
+    if addon_selected service-monitor && ! addon_selected monitoring && [[ "${ACTION}" == "addon-install" ]]; then
+      warn "service-monitor 依赖 monitoring，已自动补充 monitoring"
+      ADDONS="monitoring,${ADDONS}"
+      normalize_addons
+    fi
+
+    if addon_selected monitoring && ! addon_selected service-monitor && [[ "${ACTION}" == "addon-uninstall" ]]; then
+      warn "移除 monitoring 时会一并移除其 ServiceMonitor 声明"
+      ADDONS="${ADDONS},service-monitor"
+      normalize_addons
+    fi
+
+    if addon_selected service-monitor; then
+      SERVICE_MONITOR_ENABLED="true"
+    fi
+  fi
+
+  if [[ -z "${ADDON_MONITORING_TARGET}" ]]; then
+    ADDON_MONITORING_TARGET="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:3306"
+  fi
 }
 
 validate_action_feature_gates() {
   case "${ACTION}" in
     backup|restore|verify-backup-restore)
       [[ "${BACKUP_ENABLED}" == "true" ]] || die "动作 ${ACTION} 依赖备份能力，请使用 --enable-backup"
+      ;;
+    addon-install)
+      [[ -n "${ADDONS}" ]] || die "addon-install 需要提供 --addons"
+      ;;
+    addon-uninstall)
+      [[ -n "${ADDONS}" ]] || die "addon-uninstall 需要提供 --addons"
       ;;
     benchmark)
       [[ "${BENCHMARK_ENABLED}" == "true" ]] || die "当前 benchmark 能力已关闭，请使用 --enable-benchmark"
@@ -571,21 +763,24 @@ prompt_missing_values() {
 
 validate_environment() {
   command -v kubectl >/dev/null 2>&1 || die "未找到 kubectl"
-  if [[ "${ACTION}" == "install" && "${SKIP_IMAGE_PREPARE}" != "true" ]]; then
+  if [[ ( "${ACTION}" == "install" || "${ACTION}" == "addon-install" ) && "${SKIP_IMAGE_PREPARE}" != "true" ]]; then
     command -v docker >/dev/null 2>&1 || die "未找到 docker"
     command -v jq >/dev/null 2>&1 || die "未找到 jq"
   fi
 }
 
 validate_inputs() {
-  [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
+  if [[ "${ACTION}" != "addon-status" ]]; then
+    [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
+    [[ "${NODE_PORT}" =~ ^[0-9]+$ ]] || die "nodePort 必须是数字"
+    (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须在 30000-32767 之间"
+  fi
+
   [[ "${BACKUP_RETENTION}" =~ ^[0-9]+$ ]] || die "备份保留数量必须是数字"
   [[ "${BENCHMARK_CONCURRENCY}" =~ ^[0-9]+$ ]] || die "压测并发必须是数字"
   [[ "${BENCHMARK_ITERATIONS}" =~ ^[0-9]+$ ]] || die "压测轮数必须是数字"
   [[ "${BENCHMARK_QUERIES}" =~ ^[0-9]+$ ]] || die "压测请求量必须是数字"
-  [[ "${NODE_PORT}" =~ ^[0-9]+$ ]] || die "nodePort 必须是数字"
   [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
-  (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须在 30000-32767 之间"
   [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
 
   if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
@@ -607,22 +802,34 @@ print_plan() {
   echo "动作                    : ${ACTION}"
   echo "命名空间                : ${NAMESPACE}"
   echo "StatefulSet             : ${STS_NAME}"
-  echo "服务名                  : ${SERVICE_NAME}"
-  echo "NodePort 服务名         : ${NODEPORT_SERVICE_NAME}"
-  echo "NodePort                : ${NODE_PORT}"
-  echo "副本数                  : ${MYSQL_REPLICAS}"
-  echo "StorageClass            : ${STORAGE_CLASS}"
-  echo "存储大小                : ${STORAGE_SIZE}"
   echo "等待超时                : ${WAIT_TIMEOUT}"
-  echo "备份能力                : ${BACKUP_ENABLED}"
-  echo "备份后端                : ${BACKUP_BACKEND}"
-  echo "监控 exporter           : ${MONITORING_ENABLED}"
-  echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
-  echo "Fluent Bit              : ${FLUENTBIT_ENABLED}"
-  echo "压测能力                : ${BENCHMARK_ENABLED}"
-  if [[ "${FLUENTBIT_ENABLED}" == "true" ]]; then
-    echo "慢查询阈值(秒)          : ${MYSQL_SLOW_QUERY_TIME}"
+
+  if [[ "${ACTION}" == "addon-install" || "${ACTION}" == "addon-uninstall" ]]; then
+    echo "Addon 列表              : ${ADDONS}"
+    echo "业务影响                : 不修改 MySQL StatefulSet，不触发 MySQL Pod 滚动重建"
+    if addon_selected monitoring; then
+      echo "监控模式                : 外置 exporter Deployment"
+      echo "监控目标                : ${ADDON_MONITORING_TARGET}"
+    fi
+  else
+    echo "服务名                  : ${SERVICE_NAME}"
+    echo "NodePort 服务名         : ${NODEPORT_SERVICE_NAME}"
+    echo "NodePort                : ${NODE_PORT}"
+    echo "副本数                  : ${MYSQL_REPLICAS}"
+    echo "StorageClass            : ${STORAGE_CLASS}"
+    echo "存储大小                : ${STORAGE_SIZE}"
+    echo "备份能力                : ${BACKUP_ENABLED}"
+    echo "备份后端                : ${BACKUP_BACKEND}"
+    echo "监控 exporter           : ${MONITORING_ENABLED}"
+    echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
+    echo "Fluent Bit              : ${FLUENTBIT_ENABLED}"
+    echo "压测能力                : ${BENCHMARK_ENABLED}"
+    echo "业务影响                : install 会整套对齐资源；若 sidecar 或 MySQL 配置变化，可能触发滚动更新"
+    if [[ "${FLUENTBIT_ENABLED}" == "true" ]]; then
+      echo "慢查询阈值(秒)          : ${MYSQL_SLOW_QUERY_TIME}"
+    fi
   fi
+
   if needs_backup_storage; then
     echo "备份根目录              : ${BACKUP_ROOT_DIR}"
     echo "备份计划                : ${BACKUP_SCHEDULE}"
@@ -673,6 +880,7 @@ extract_payload() {
   [[ -f "${BACKUP_MANIFEST}" ]] || die "缺少备份 manifest"
   [[ -f "${RESTORE_MANIFEST}" ]] || die "缺少恢复 manifest"
   [[ -f "${BENCHMARK_MANIFEST}" ]] || die "缺少压测 manifest"
+  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || die "缺少监控 addon manifest"
   [[ -f "${IMAGE_JSON}" ]] || die "缺少 image.json"
   success "载荷解压完成"
 }
@@ -684,6 +892,31 @@ docker_login() {
   else
     warn "镜像仓库登录失败，继续尝试后续流程"
   fi
+}
+
+image_needed_for_current_action() {
+  local image_tag="$1"
+
+  case "${ACTION}" in
+    install)
+      return 0
+      ;;
+    addon-install)
+      if addon_selected monitoring && [[ "${image_tag}" == */mysqld-exporter:* ]]; then
+        return 0
+      fi
+      if addon_selected backup && [[ "${image_tag}" == */busybox:* ]]; then
+        return 0
+      fi
+      if addon_selected backup && backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 prepare_images() {
@@ -704,6 +937,7 @@ prepare_images() {
     image_tag="$(jq -r '.tag // .pull' <<<"${item}")"
     tar_path="${IMAGE_DIR}/${tar_name}"
 
+    image_needed_for_current_action "${image_tag}" || continue
     [[ -f "${tar_path}" ]] || continue
 
     log "导入镜像归档 ${tar_name}"
@@ -780,12 +1014,19 @@ template_replace() {
     -e "s#__NODE_PORT__#${NODE_PORT}#g" \
     -e "s#__METRICS_SERVICE_NAME__#${METRICS_SERVICE_NAME}#g" \
     -e "s#__METRICS_PORT__#${METRICS_PORT}#g" \
-    -e "s#__SERVICE_MONITOR_NAME__#${SERVICE_MONITOR_NAME}#g" \
-    -e "s#__SERVICE_MONITOR_INTERVAL__#${SERVICE_MONITOR_INTERVAL}#g" \
-    -e "s#__SERVICE_MONITOR_SCRAPE_TIMEOUT__#${SERVICE_MONITOR_SCRAPE_TIMEOUT}#g" \
-    -e "s#__FLUENTBIT_CONFIGMAP__#${FLUENTBIT_CONFIGMAP}#g" \
-    -e "s#__MYSQL_SLOW_QUERY_TIME__#${MYSQL_SLOW_QUERY_TIME}#g" \
-    -e "s#__BACKUP_SCRIPT_CONFIGMAP__#${BACKUP_SCRIPT_CONFIGMAP}#g" \
+      -e "s#__SERVICE_MONITOR_NAME__#${SERVICE_MONITOR_NAME}#g" \
+      -e "s#__SERVICE_MONITOR_INTERVAL__#${SERVICE_MONITOR_INTERVAL}#g" \
+      -e "s#__SERVICE_MONITOR_SCRAPE_TIMEOUT__#${SERVICE_MONITOR_SCRAPE_TIMEOUT}#g" \
+      -e "s#__ADDON_EXPORTER_DEPLOYMENT_NAME__#${ADDON_EXPORTER_DEPLOYMENT_NAME}#g" \
+      -e "s#__ADDON_EXPORTER_SERVICE_NAME__#${ADDON_EXPORTER_SERVICE_NAME}#g" \
+      -e "s#__ADDON_EXPORTER_SECRET__#${ADDON_EXPORTER_SECRET}#g" \
+      -e "s#__ADDON_EXPORTER_USERNAME__#${ADDON_EXPORTER_USERNAME}#g" \
+      -e "s#__ADDON_EXPORTER_PASSWORD__#${ADDON_EXPORTER_PASSWORD}#g" \
+      -e "s#__ADDON_MONITORING_TARGET__#${ADDON_MONITORING_TARGET}#g" \
+      -e "s#__ADDON_SERVICE_MONITOR_NAME__#${ADDON_SERVICE_MONITOR_NAME}#g" \
+      -e "s#__FLUENTBIT_CONFIGMAP__#${FLUENTBIT_CONFIGMAP}#g" \
+      -e "s#__MYSQL_SLOW_QUERY_TIME__#${MYSQL_SLOW_QUERY_TIME}#g" \
+      -e "s#__BACKUP_SCRIPT_CONFIGMAP__#${BACKUP_SCRIPT_CONFIGMAP}#g" \
     -e "s#__BACKUP_CRONJOB_NAME__#${BACKUP_CRONJOB_NAME}#g" \
     -e "s#__BACKUP_STORAGE_SECRET__#${BACKUP_STORAGE_SECRET}#g" \
     -e "s#__BACKUP_BACKEND__#${BACKUP_BACKEND}#g" \
@@ -823,6 +1064,10 @@ apply_mysql_manifests() {
 
 apply_backup_manifests() {
   render_manifest "${BACKUP_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+apply_monitoring_addon_manifests() {
+  render_manifest "${MONITORING_ADDON_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 apply_restore_job() {
@@ -925,6 +1170,53 @@ write_report() {
   echo "${report_path}"
 }
 
+resource_exists() {
+  local kind="$1"
+  local name="$2"
+  kubectl get "${kind}" "${name}" -n "${NAMESPACE}" >/dev/null 2>&1
+}
+
+namespace_exists() {
+  kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1
+}
+
+require_namespace_exists() {
+  namespace_exists || die "未找到命名空间 ${NAMESPACE}"
+}
+
+statefulset_has_container() {
+  local container_name="$1"
+  local containers
+  containers="$(kubectl get statefulset "${STS_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null || true)"
+  [[ " ${containers} " == *" ${container_name} "* ]]
+}
+
+ensure_statefulset_exists() {
+  kubectl get statefulset "${STS_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1 || die "未找到 StatefulSet/${STS_NAME}，请先确认 MySQL 已存在"
+}
+
+sql_escape() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+ensure_addon_exporter_user() {
+  local exporter_user exporter_password
+  exporter_user="$(sql_escape "${ADDON_EXPORTER_USERNAME}")"
+  exporter_password="$(sql_escape "${ADDON_EXPORTER_PASSWORD}")"
+
+  section "补齐监控账号"
+  mysql_exec "CREATE USER IF NOT EXISTS '${exporter_user}'@'%' IDENTIFIED BY '${exporter_password}';"
+  mysql_exec "GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO '${exporter_user}'@'%';"
+  mysql_exec "FLUSH PRIVILEGES;"
+  success "监控账号已就绪"
+}
+
+delete_external_monitoring_resources() {
+  kubectl delete deployment -n "${NAMESPACE}" --ignore-not-found "${ADDON_EXPORTER_DEPLOYMENT_NAME}" >/dev/null 2>&1 || true
+  kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${ADDON_EXPORTER_SERVICE_NAME}" >/dev/null 2>&1 || true
+  kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${ADDON_EXPORTER_SECRET}" >/dev/null 2>&1 || true
+}
+
 delete_backup_resources() {
   kubectl delete cronjob -n "${NAMESPACE}" --ignore-not-found "${BACKUP_CRONJOB_NAME}" >/dev/null 2>&1 || true
   kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${BACKUP_SCRIPT_CONFIGMAP}" >/dev/null 2>&1 || true
@@ -976,9 +1268,107 @@ install_app() {
   success "MySQL 安装/对齐完成"
 }
 
+install_addons() {
+  extract_payload
+  prepare_images
+  require_namespace_exists
+  ensure_statefulset_exists
+  wait_for_mysql_ready
+
+  if addon_selected monitoring; then
+    if statefulset_has_container "mysqld-exporter"; then
+      die "当前 MySQL 已启用内嵌 exporter sidecar，不建议再叠加外置 monitoring addon"
+    fi
+
+    if addon_selected service-monitor && ! cluster_supports_service_monitor; then
+      warn "集群中未安装 ServiceMonitor CRD，本次仅安装 monitoring addon，跳过 service-monitor"
+      ADDONS="${ADDONS//service-monitor/}"
+      ADDONS="${ADDONS//,,/,}"
+      ADDONS="${ADDONS#,}"
+      ADDONS="${ADDONS%,}"
+      SERVICE_MONITOR_ENABLED="false"
+    fi
+
+    ensure_addon_exporter_user
+
+    section "安装 monitoring addon"
+    apply_monitoring_addon_manifests
+    kubectl rollout status "deployment/${ADDON_EXPORTER_DEPLOYMENT_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
+    success "monitoring addon 安装完成"
+  fi
+
+  if addon_selected backup; then
+    section "安装 backup addon"
+    apply_backup_manifests
+    success "backup addon 安装完成"
+  fi
+}
+
+uninstall_addons() {
+  require_namespace_exists
+
+  if addon_selected service-monitor && cluster_supports_service_monitor; then
+    kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if addon_selected monitoring; then
+    section "移除 monitoring addon"
+    delete_external_monitoring_resources
+    success "monitoring addon 已移除"
+  fi
+
+  if addon_selected backup; then
+    section "移除 backup addon"
+    delete_backup_resources
+    success "backup addon 已移除"
+  fi
+}
+
+show_addon_status() {
+  local external_monitoring="未安装"
+  local embedded_monitoring="未安装"
+  local backup_addon="未安装"
+  local embedded_logging="未安装"
+  local addon_service_monitor="未安装"
+  local embedded_service_monitor="未安装"
+
+  require_namespace_exists
+
+  resource_exists deployment "${ADDON_EXPORTER_DEPLOYMENT_NAME}" && external_monitoring="已安装"
+  resource_exists cronjob "${BACKUP_CRONJOB_NAME}" && backup_addon="已安装"
+
+  if resource_exists statefulset "${STS_NAME}"; then
+    statefulset_has_container "mysqld-exporter" && embedded_monitoring="已安装"
+    statefulset_has_container "fluent-bit" && embedded_logging="已安装"
+  fi
+
+  if cluster_supports_service_monitor; then
+    resource_exists servicemonitor "${ADDON_SERVICE_MONITOR_NAME}" && addon_service_monitor="已安装"
+    resource_exists servicemonitor "${SERVICE_MONITOR_NAME}" && embedded_service_monitor="已安装"
+  else
+    addon_service_monitor="集群未安装 CRD"
+    embedded_service_monitor="集群未安装 CRD"
+  fi
+
+  section "Addon 状态"
+  echo "外置 monitoring addon   : ${external_monitoring}"
+  echo "内嵌 monitoring sidecar : ${embedded_monitoring}"
+  echo "外置 ServiceMonitor     : ${addon_service_monitor}"
+  echo "内嵌 ServiceMonitor     : ${embedded_service_monitor}"
+  echo "backup addon            : ${backup_addon}"
+  echo "Fluent Bit sidecar      : ${embedded_logging}"
+  echo
+  echo "推荐结论:"
+  echo "1. 已有 MySQL 若补监控/备份，优先使用 addon-install，新资源以 Deployment/CronJob 形式补齐。"
+  echo "2. 日志推荐接入平台级 DaemonSet 日志体系，不建议默认叠加 sidecar。"
+  echo "3. 只有在必须采集容器内 slow log 文件时，才建议走 install --enable-fluentbit。"
+}
+
 show_status() {
   section "运行状态"
   kubectl get statefulset -n "${NAMESPACE}" || true
+  echo
+  kubectl get deployment -n "${NAMESPACE}" || true
   echo
   kubectl get pods -n "${NAMESPACE}" -o wide || true
   echo
@@ -1141,6 +1531,22 @@ $( [[ "${BENCHMARK_ENABLED}" == "true" ]] && echo "./mysql-installer.run benchma
 EOF
 }
 
+show_post_addon_notes() {
+  section "Addon 后续建议"
+  cat <<EOF
+kubectl get pods -n ${NAMESPACE}
+kubectl get deploy -n ${NAMESPACE}
+kubectl get cronjob -n ${NAMESPACE}
+$( cluster_supports_service_monitor && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+
+业务影响说明:
+1. addon-install 默认不修改 MySQL StatefulSet
+2. monitoring addon 会额外创建 exporter Deployment
+3. backup addon 会额外创建 CronJob
+4. 如需日志 sidecar，请改用 install，并提前评估滚动更新窗口
+EOF
+}
+
 cleanup() {
   rm -rf "${WORKDIR}" >/dev/null 2>&1 || true
 }
@@ -1161,7 +1567,7 @@ main() {
   validate_environment
   validate_inputs
 
-  if [[ "${ACTION}" != "status" ]]; then
+  if [[ "${ACTION}" != "status" && "${ACTION}" != "addon-status" ]]; then
     confirm_plan
   fi
 
@@ -1169,6 +1575,16 @@ main() {
     install)
       install_app
       show_post_install_notes
+      ;;
+    addon-install)
+      install_addons
+      show_post_addon_notes
+      ;;
+    addon-uninstall)
+      uninstall_addons
+      ;;
+    addon-status)
+      show_addon_status
       ;;
     uninstall)
       uninstall_app

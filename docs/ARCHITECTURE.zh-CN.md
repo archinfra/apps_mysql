@@ -1,147 +1,186 @@
 # MySQL 离线安装器架构解析
 
-## 1. 目标
+## 1. 设计目标
 
-本项目的目标不是做一个“只能首次安装”的一次性脚本，而是做一个可以反复执行、可按需开关能力、适合离线环境交付的 MySQL 安装包。它需要解决四类问题：
+这套安装器解决的不是“怎么把 MySQL 首次装起来”，而是下面四类长期运维问题：
 
-1. MySQL 本体部署和基础访问。
-2. 备份、恢复、恢复校验。
-3. 监控、日志采集、压测等运维辅助能力。
-4. 在不同集群能力不完整的情况下，仍然可以稳定安装。
+1. MySQL 本体如何在离线环境稳定交付。
+2. 备份、恢复、恢复校验如何标准化。
+3. 已有 MySQL 如何后补监控、备份等运维能力。
+4. 在集群外部能力不完整时，如何做到“能装、能跳过、边界清晰”。
 
-## 2. 总体结构
+## 2. 两层能力模型
+
+当前版本把能力拆成两层：
 
 ```mermaid
 flowchart TD
-    A["install.sh"] --> B["manifests/innodb-mysql.yaml"]
-    A --> C["manifests/mysql-backup.yaml"]
-    A --> D["manifests/mysql-restore-job.yaml"]
-    A --> E["manifests/mysql-benchmark-job.yaml"]
-    A --> F["images/image.json"]
+    A["install.sh"] --> B["install: 整套对齐"]
+    A --> C["addon-install: 外置补齐"]
 
-    B --> G["StatefulSet + Service + Secret + ConfigMap"]
-    B --> H["mysqld-exporter sidecar"]
-    B --> I["Fluent Bit sidecar"]
-    B --> J["ServiceMonitor(可选)"]
+    B --> D["StatefulSet / Service / Secret / ConfigMap"]
+    B --> E["嵌入式 sidecar 能力"]
+    E --> F["mysqld-exporter sidecar"]
+    E --> G["Fluent Bit sidecar"]
 
-    C --> K["CronJob 备份"]
-    D --> L["Job 恢复"]
-    E --> M["Job 压测"]
+    C --> H["外置 addon 资源"]
+    H --> I["mysqld-exporter Deployment"]
+    H --> J["CronJob 备份"]
+    H --> K["ServiceMonitor 声明"]
 ```
 
-## 3. 安装器工作方式
+### 2.1 install
 
-`install.sh` 的核心定位是“声明式对齐器”。
+`install` 的定位是“整套声明式对齐器”。
 
-这意味着：
+适用场景：
 
-1. 第一次执行时，它会创建资源。
-2. 第二次执行时，它会按当前命令行参数更新已有资源。
-3. 当某个可选能力被关闭时，它不仅不再创建，还会清理旧的残留资源。
+1. 首次安装。
+2. 已有实例需要整体变更配置。
+3. 可以接受 MySQL Pod 滚动更新。
+4. 需要启用 sidecar 型能力。
 
-这样做的好处是后期运维简单。比如一开始没装 `ServiceMonitor`，等集群补了 `Prometheus Operator` 后，只要再次执行 `install`，就能补齐监控声明。
+### 2.2 addon-install
 
-## 4. 为什么 exporter 采用 sidecar
+`addon-install` 的定位是“外置能力补齐器”。
 
-`mysqld-exporter` 与 MySQL 实例关系紧密，sidecar 方式有几个明显优势：
+适用场景：
 
-1. 生命周期天然绑定，不需要再额外维护一个独立 Deployment。
-2. 就近采集，配置简单。
-3. 即便没有 `ServiceMonitor`，指标端口依然可被手工采集。
+1. MySQL 已经在跑。
+2. 只想补监控或备份能力。
+3. 不希望因为补能力而滚动重建 MySQL Pod。
 
-因此当前版本把 exporter 作为实例级能力内嵌，而不是拆成集群级组件。
+## 3. 为什么要区分“嵌入式能力”和“外置 addon”
 
-## 5. 为什么 ServiceMonitor 不强制安装整套监控体系
+用户真正关心的不是组件名字，而是业务影响。
 
-`ServiceMonitor` 只是 Prometheus Operator 的 CRD 资源，不是完整监控平台本身。
+在 Kubernetes 里：
 
-如果集群没有对应 CRD，强行创建只会安装失败。因此当前策略是：
+1. 改 StatefulSet Pod 模板，通常就意味着滚动更新。
+2. 额外创建 Deployment / CronJob / Service / CRD 资源，则通常不会动到现有 MySQL Pod。
 
-1. exporter sidecar 仍然默认安装。
-2. 只有发现 `servicemonitors.monitoring.coreos.com` CRD 时才创建 `ServiceMonitor`。
-3. 本项目不代装 Prometheus Operator。
+所以我们把“是否影响数据库工作负载”作为第一分类标准，而不是把所有能力都放进一次安装里。
 
-这个边界是刻意设计的。MySQL 安装包应尽量避免去安装集群级公共能力，以减少副作用。
+## 4. 监控设计决策
 
-## 6. 为什么 Fluent Bit 采用 sidecar
+### 4.1 嵌入式监控
 
-MySQL 的 `error log` 和 `slow query log` 在容器内部文件路径下生成。若使用 sidecar：
+在 `install` 路径里，`mysqld-exporter` 仍支持 sidecar 模式。
 
-1. 能直接共享卷读取日志文件。
-2. 不依赖宿主机日志路径。
-3. 对单实例问题定位更直接。
+优点：
 
-当前版本不尝试安装集群级 DaemonSet 日志方案，因为那会引入更大的平台边界和更多前置依赖。后续若需要统一日志平台，建议单独做一个日志栈安装包。
+1. 与数据库实例生命周期绑定。
+2. 对单 Pod 指标语义最直接。
+3. 对多副本情况下的逐实例观测更自然。
+
+代价：
+
+1. 需要改 StatefulSet 模板。
+2. 可能触发滚动更新。
+
+### 4.2 外置监控 addon
+
+在 `addon-install` 路径里，监控采用外置 `mysqld-exporter Deployment`。
+
+优点：
+
+1. 新增 Pod 即可完成补齐。
+2. 不重建 MySQL Pod。
+3. 对“已有实例后补监控”场景非常友好。
+
+代价：
+
+1. 当前默认监控目标是 `mysql-0.mysql.<ns>.svc.cluster.local:3306`。
+2. 更适合单实例或主节点优先观测场景。
+3. 若你要逐副本精细采集，嵌入式 sidecar 仍然更强。
+
+## 5. ServiceMonitor 的边界
+
+`ServiceMonitor` 只是 Prometheus Operator 的 CRD 声明，不是完整监控平台。
+
+因此本项目刻意不做两件事：
+
+1. 不代装 Prometheus Operator。
+2. 不把缺少 CRD 视为安装失败。
+
+当前策略是：
+
+1. 如果 CRD 存在，则创建 `ServiceMonitor`。
+2. 如果 CRD 不存在，则给出 warning 并跳过。
+3. 监控 addon 自身仍可成立，只是少了声明资源。
+
+## 6. 日志设计决策
+
+### 6.1 推荐路径：平台级日志体系
+
+如果你已经规划 DaemonSet 级 Fluent Bit + ES / OpenSearch / Loki，那么推荐把日志采集放到平台层。
+
+原因：
+
+1. 平台职责边界清晰。
+2. 多应用统一治理更容易。
+3. 不需要为了日志去修改数据库工作负载。
+
+### 6.2 兼容路径：MySQL sidecar
+
+如果你的目标是：
+
+1. 直接读取容器内 `slow log` 文件。
+2. 平台侧拿不到这些文件。
+3. 接受滚动更新窗口。
+
+那么仍然可以使用 `install --enable-fluentbit` 走嵌入式 sidecar 路径。
+
+这是一条兼容能力，不再是“已有 MySQL 后补能力”的推荐默认值。
 
 ## 7. 备份后端设计
 
 ### 7.1 NFS
 
-NFS 适合离线环境和内网环境。使用时需要两个信息：
+NFS 模式适合内网和离线环境。
+
+用户至少需要提供：
 
 1. `--backup-nfs-server`
 2. `--backup-nfs-path`
 
-安装器会在导出路径下自动创建业务子目录：
+安装器会自动在导出路径下建立业务子目录：
 
 ```text
 <backup-nfs-path>/<backup-root-dir>/mysql/<namespace>/<sts-name>/
 ```
 
-所以你不需要手工再去拼 `mysql/aict/mysql` 这一层，只需要提供“导出根路径”即可。
-
 ### 7.2 S3
 
-S3 模式支持 MinIO、Ceph RGW、AWS S3 等兼容对象存储。
+S3 模式支持兼容对象存储。
 
-关键设计点：
-
-1. 备份前先从远端同步已有快照到本地暂存目录。
-2. 在本地执行保留策略。
-3. 再把结果同步回对象存储。
-
-这样可以让 S3 与 NFS 共用同一套快照命名和保留逻辑。
-
-对象路径规则：
+路径规则：
 
 ```text
 <bucket>/<s3-prefix>/<backup-root-dir>/mysql/<namespace>/<sts-name>/
 ```
 
+实现思路是：
+
+1. 先把对象存储中的已有快照同步到本地暂存目录。
+2. 在本地执行统一的快照命名和保留逻辑。
+3. 再把结果同步回对象存储。
+
+这样 NFS 和 S3 能共用同一套快照语义。
+
 ## 8. 数据复用与重装
 
-默认情况下，`uninstall` 不会删除 PVC。这意味着在以下条件同时满足时，重装可以直接复用数据卷：
+默认 `uninstall` 不删除 PVC，因此在以下条件满足时，重装可直接复用原数据：
 
 1. `namespace` 不变。
 2. `--sts-name` 不变。
 3. 没有执行 `uninstall --delete-pvc`。
-4. 原 PVC / PV 没有被底层存储回收。
+4. 底层 PV 没有被回收。
 
-不复用的典型场景：
+## 9. 当前推荐实践
 
-1. 改了 namespace。
-2. 改了 `--sts-name`。
-3. 删除了 PVC。
-4. 存储类回收策略导致 PV 被释放。
-
-## 9. 缺少外部能力时的处理策略
-
-### 9.1 没有 ServiceMonitor CRD
-
-安装继续，只跳过 `ServiceMonitor`。
-
-### 9.2 没有集中日志平台
-
-Fluent Bit sidecar 仍然可以运行；如果环境暂时不需要，直接 `--disable-fluentbit`。
-
-### 9.3 没有 Prometheus
-
-exporter sidecar 依然可暴露 `/metrics`，后期平台补齐后可再次执行 `install` 进行对齐。
-
-## 10. 推荐的后续演进
-
-当前版本建议保持“应用内嵌 + 集群外部能力分离”的方向：
-
-1. MySQL 安装器只负责实例级能力和必要声明。
-2. Prometheus Operator、日志平台、集中告警等应作为独立安装包维护。
-3. 二者通过 `install` 的重复执行完成对齐，而不是耦合到一次安装里。
+1. 首次安装时，用 `install` 决定数据库本体和是否接受 sidecar。
+2. 已有实例后补能力时，用 `addon-install`。
+3. 监控优先用外置 addon。
+4. 日志优先用平台级 DaemonSet。
+5. 只有在必须采集容器内文件日志时，才回到 sidecar。
