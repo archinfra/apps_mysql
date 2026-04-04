@@ -494,6 +494,69 @@ show_help_backup_restore() {
 EOF
 }
 
+show_help_params() {
+  cat <<'EOF'
+全量参数速查（按类型）:
+
+通用参数:
+  -n, --namespace <ns>
+  -y, --yes
+  --wait-timeout <duration>
+  --skip-image-prepare
+
+实例规格参数:
+  --root-password <password>
+  --mysql-replicas <num>
+  --mysql-slow-query-time <sec>
+  --storage-class <name>
+  --storage-size <size>
+  --service-name <name>
+  --sts-name <name>
+  --nodeport-service-name <name>
+  --node-port <port>
+
+能力开关:
+  --enable-monitoring / --disable-monitoring
+  --enable-service-monitor / --disable-service-monitor
+  --enable-fluentbit / --disable-fluentbit
+  --enable-backup / --disable-backup
+  --enable-benchmark / --disable-benchmark
+
+addon 参数:
+  --addons <list>
+  --exporter-user <user>
+  --exporter-password <password>
+  --monitoring-target <host:port>
+
+备份参数:
+  --backup-backend nfs|s3
+  --backup-nfs-server <addr>
+  --backup-nfs-path <path>
+  --backup-root-dir <dir>
+  --backup-schedule <cron>
+  --backup-retention <num>
+  --s3-endpoint <url>
+  --s3-bucket <bucket>
+  --s3-prefix <prefix>
+  --s3-access-key <ak>
+  --s3-secret-key <sk>
+  --s3-insecure
+
+恢复与清理参数:
+  --restore-snapshot <name|latest>
+  --delete-pvc
+
+压测参数:
+  --benchmark-concurrency <n>
+  --benchmark-iterations <n>
+  --benchmark-queries <n>
+  --report-dir <path>
+
+建议:
+  先看 help examples，再按动作看 help install / help addons / help backup。
+EOF
+}
+
 show_help_architecture() {
   cat <<'EOF'
 架构边界:
