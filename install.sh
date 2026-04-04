@@ -78,6 +78,11 @@ REPORT_DIR="./reports"
 BENCHMARK_CONCURRENCY="32"
 BENCHMARK_ITERATIONS="3"
 BENCHMARK_QUERIES="2000"
+BENCHMARK_WARMUP_ROWS="10000"
+BENCHMARK_PROFILE="oltp-readwrite"
+BENCHMARK_HOST=""
+BENCHMARK_PORT="3306"
+BENCHMARK_USER="root"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -130,7 +135,7 @@ show_help_overview() {
 用法:
   ./mysql-installer.run <动作> [参数]
   ./mysql-installer.run help [主题]
-  ./mysql-installer.run <动作> --help   (即将支持，当前请用 help <主题>)
+  ./mysql-installer.run <动作> --help   (当前请用 help <主题>)
 
 动作:
   install                 安装或整套对齐 MySQL 资源
@@ -153,6 +158,7 @@ help 主题:
   restore         恢复与重装复用说明
   benchmark       压测说明
   params          全量参数速查（按场景）
+  backup-restore  备份恢复原理与业务影响
   logging         日志采集模式设计
   architecture    架构设计和边界
   examples        常见示例
@@ -185,8 +191,9 @@ install 是“声明式整套对齐”动作，不只是首次安装。
   3. 允许滚动更新时补齐 sidecar 型能力
   4. 在不删除 PVC 的情况下重装并复用数据
 
-常用参数:
+核心参数:
   -n, --namespace <ns>              默认: aict
+  --auth-secret <name>              默认: mysql-auth（backup/restore/benchmark 会读取它）
   --root-password <password>        默认: passw0rd
   --mysql-replicas <num>            默认: 1
   --mysql-slow-query-time <sec>     默认: 2
@@ -199,6 +206,25 @@ install 是“声明式整套对齐”动作，不只是首次安装。
   --wait-timeout <duration>         默认: 10m
   --skip-image-prepare              跳过 docker load/push
   -y, --yes                         跳过交互确认
+
+备份相关参数（install 同时可配置）:
+  --backup-backend nfs|s3
+  --backup-nfs-server <addr>
+  --backup-nfs-path <path>
+  --backup-root-dir <dir>
+  --backup-schedule <cron>
+  --backup-retention <num>
+  --s3-endpoint <url>
+  --s3-bucket <bucket>
+  --s3-prefix <prefix>
+  --s3-access-key <ak>
+  --s3-secret-key <sk>
+  --s3-insecure
+
+存储目录说明:
+  - MySQL 数据目录固定为容器内 /var/lib/mysql（由镜像与 StatefulSet 定义）
+  - 可配置的是 PVC 容量与存储类（--storage-size / --storage-class）
+  - 备份目录可通过 --backup-root-dir 配置
 
 特性开关:
   --enable-monitoring / --disable-monitoring
@@ -275,11 +301,17 @@ EOF
 
 show_help_backup() {
   cat <<'EOF'
+backup 有两个场景（请区分）:
+  场景 A: install / addon-install 时开启 backup 组件（CronJob 定时备份）
+  场景 B: 直接执行 backup 动作（立即触发一次备份 Job）
+  说明: backup 动作会先校装备份组件，再创建一次手工 Job。
+
 备份后端支持:
   --backup-backend nfs|s3
 
 NFS 参数:
   --enable-backup                  开启备份能力（backup/restore/verify 必需）
+  --auth-secret <name>             默认: mysql-auth（读取 mysql-root-password）
   --backup-nfs-server <addr>    NFS 服务端地址，必填
   --backup-nfs-path <path>      NFS 导出路径，默认: /data/nfs-share
   --backup-root-dir <dir>       默认: backups
@@ -293,6 +325,7 @@ NFS 是否需要指定目录？
 
 S3 参数:
   --enable-backup                  开启备份能力（backup/restore/verify 必需）
+  --auth-secret <name>             默认: mysql-auth（读取 mysql-root-password）
   --s3-endpoint <url>           必填，示例: https://minio.example.com
   --s3-bucket <bucket>          必填
   --s3-prefix <prefix>          可选
@@ -306,6 +339,11 @@ S3 路径规则:
 动作提醒:
   1) 执行一次手工备份: ./mysql-installer.run backup --enable-backup ...
   2) 闭环校验:         ./mysql-installer.run verify-backup-restore --enable-backup ...
+
+故障排查:
+  - 报错 "secret \"mysql-auth\" not found" 时，可选:
+    1) 指定正确的认证 Secret: --auth-secret <secret-name>
+    2) 或显式传 --root-password，安装器会自动创建/更新该 Secret
 EOF
 }
 
@@ -313,14 +351,24 @@ show_help_restore() {
   cat <<'EOF'
 restore 支持 latest 或指定快照名。
 
+恢复原理:
+  1) 下载/挂载快照（NFS 直接挂载，S3 先下载到临时目录）
+  2) gunzip 后通过 mysql 客户端导入
+  3) SQL 内若包含 DROP DATABASE / CREATE DATABASE，会覆盖同名库对象
+
 建议顺序:
   1. 如果 PVC 还在，优先重装复用 PVC
   2. 如果 PVC 不在，再执行 restore
 
 常用参数:
   --enable-backup
+  --auth-secret <name>
   --restore-snapshot latest
   --restore-snapshot 20260403T020000Z
+
+业务影响:
+  - 不会主动停 MySQL Pod，但导入期间会占用实例资源，建议在低峰期执行
+  - 恢复到旧快照会“回滚数据状态”，请先评估是否需要先做一次当前快照备份
 
 示例:
   ./mysql-installer.run restore \
@@ -338,10 +386,111 @@ benchmark 会在集群内创建 Job，对 MySQL 做并发 SQL 压测。
 
 参数:
   --enable-benchmark             开启压测能力（benchmark 动作必需）
+  --auth-secret <name>           默认: mysql-auth（读取 mysql-root-password）
+  --benchmark-host <host>        默认: <sts>-0.<svc>.<ns>.svc.cluster.local
+  --benchmark-port <port>        默认: 3306
+  --benchmark-user <user>        默认: root
   --benchmark-concurrency <n>   默认: 32
   --benchmark-iterations <n>    默认: 3
   --benchmark-queries <n>       默认: 2000
+  --benchmark-warmup-rows <n>   默认: 10000（压测前准备数据量）
+  --benchmark-profile <name>    oltp-readonly|oltp-readwrite|point-select
   --report-dir <path>           默认: ./reports
+
+输出指标:
+  - 会输出 mysql_version、总耗时、吞吐、p50/p95/p99 延迟
+  - 读写压测会包含数据预热、随机点查、随机范围查、写入/更新
+EOF
+}
+
+show_help_params() {
+  cat <<'EOF'
+全量参数速查（按类型）:
+
+通用参数:
+  -n, --namespace <ns>
+  -y, --yes
+  --wait-timeout <duration>
+  --skip-image-prepare
+
+实例规格参数:
+  --root-password <password>
+  --auth-secret <name>
+  --mysql-replicas <num>
+  --mysql-slow-query-time <sec>
+  --storage-class <name>
+  --storage-size <size>
+  --service-name <name>
+  --sts-name <name>
+  --nodeport-service-name <name>
+  --node-port <port>
+
+能力开关:
+  --enable-monitoring / --disable-monitoring
+  --enable-service-monitor / --disable-service-monitor
+  --enable-fluentbit / --disable-fluentbit
+  --enable-backup / --disable-backup
+  --enable-benchmark / --disable-benchmark
+
+addon 参数:
+  --addons <list>
+  --exporter-user <user>
+  --exporter-password <password>
+  --monitoring-target <host:port>
+
+备份参数:
+  --backup-backend nfs|s3
+  --backup-nfs-server <addr>
+  --backup-nfs-path <path>
+  --backup-root-dir <dir>
+  --backup-schedule <cron>
+  --backup-retention <num>
+  --s3-endpoint <url>
+  --s3-bucket <bucket>
+  --s3-prefix <prefix>
+  --s3-access-key <ak>
+  --s3-secret-key <sk>
+  --s3-insecure
+
+恢复与清理参数:
+  --restore-snapshot <name|latest>
+  --delete-pvc
+
+压测参数:
+  --benchmark-concurrency <n>
+  --benchmark-iterations <n>
+  --benchmark-queries <n>
+  --benchmark-warmup-rows <n>
+  --benchmark-profile <name>
+  --benchmark-host <host>
+  --benchmark-port <port>
+  --benchmark-user <user>
+  --report-dir <path>
+
+建议:
+  先看 help examples，再按动作看 help install / help addons / help backup。
+EOF
+}
+
+show_help_backup_restore() {
+  cat <<'EOF'
+备份原理:
+  1) backup.sh 先连 MySQL 探测可用性
+  2) 枚举用户库（排除 system 库），执行 mysqldump 并 gzip
+  3) 生成 sha256 和 meta，更新 latest.txt，按保留数清理旧快照
+  4) NFS 直接写共享目录；S3 通过 sidecar 同步到对象存储
+
+恢复原理:
+  1) 定位快照（latest 或指定文件）
+  2) 校验 checksum（若存在）
+  3) gunzip | mysql 导入
+
+是否需要停业务:
+  - 当前实现不强制停库；但恢复导入会修改目标库数据，建议维护窗口执行。
+
+恢复时已有数据如何处理:
+  - 由快照 SQL 决定。当前 mysqldump 含 --add-drop-database，通常会覆盖同名库。
+  - 工程建议: 先执行一次即时备份，再做恢复；必要时先在隔离实例演练。
 EOF
 }
 
@@ -500,6 +649,9 @@ show_help() {
     params)
       show_help_params
       ;;
+    backup-restore)
+      show_help_backup_restore
+      ;;
     logging)
       show_help_logging
       ;;
@@ -510,7 +662,7 @@ show_help() {
       show_help_examples
       ;;
     *)
-      die "未知 help 主题: ${HELP_TOPIC}。可用主题: overview, install, addons, backup, restore, benchmark, params, logging, architecture, examples"
+      die "未知 help 主题: ${HELP_TOPIC}。可用主题: overview, install, addons, backup, restore, benchmark, params, backup-restore, logging, architecture, examples"
       ;;
   esac
 }
@@ -566,6 +718,10 @@ parse_args() {
         ;;
       --root-password)
         MYSQL_ROOT_PASSWORD="$2"
+        shift 2
+        ;;
+      --auth-secret)
+        AUTH_SECRET="$2"
         shift 2
         ;;
         --service-name)
@@ -724,6 +880,26 @@ parse_args() {
         BENCHMARK_QUERIES="$2"
         shift 2
         ;;
+      --benchmark-warmup-rows)
+        BENCHMARK_WARMUP_ROWS="$2"
+        shift 2
+        ;;
+      --benchmark-profile)
+        BENCHMARK_PROFILE="$2"
+        shift 2
+        ;;
+      --benchmark-host)
+        BENCHMARK_HOST="$2"
+        shift 2
+        ;;
+      --benchmark-port)
+        BENCHMARK_PORT="$2"
+        shift 2
+        ;;
+      --benchmark-user)
+        BENCHMARK_USER="$2"
+        shift 2
+        ;;
       -y|--yes)
         AUTO_YES="true"
         shift
@@ -821,6 +997,10 @@ resolve_feature_dependencies() {
   if [[ -z "${ADDON_MONITORING_TARGET}" ]]; then
     ADDON_MONITORING_TARGET="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:3306"
   fi
+
+  if [[ -z "${BENCHMARK_HOST}" ]]; then
+    BENCHMARK_HOST="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local"
+  fi
 }
 
 validate_action_feature_gates() {
@@ -838,6 +1018,25 @@ validate_action_feature_gates() {
       [[ "${BENCHMARK_ENABLED}" == "true" ]] || die "当前 benchmark 能力已关闭，请使用 --enable-benchmark"
       ;;
   esac
+}
+
+action_needs_mysql_auth() {
+  [[ "${ACTION}" == "backup" || "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" || "${ACTION}" == "benchmark" ]]
+}
+
+prepare_runtime_auth_secret() {
+  action_needs_mysql_auth || return 0
+
+  if kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  [[ -n "${MYSQL_ROOT_PASSWORD}" ]] || die "命名空间 ${NAMESPACE} 中未找到 Secret/${AUTH_SECRET}，且未提供 --root-password，无法执行 ${ACTION}"
+  warn "命名空间 ${NAMESPACE} 中未找到 Secret/${AUTH_SECRET}，将基于 --root-password 自动创建"
+  kubectl create secret generic "${AUTH_SECRET}" \
+    -n "${NAMESPACE}" \
+    --from-literal=mysql-root-password="${MYSQL_ROOT_PASSWORD}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
 prompt_missing_values() {
@@ -890,8 +1089,11 @@ validate_inputs() {
   [[ "${BENCHMARK_CONCURRENCY}" =~ ^[0-9]+$ ]] || die "压测并发必须是数字"
   [[ "${BENCHMARK_ITERATIONS}" =~ ^[0-9]+$ ]] || die "压测轮数必须是数字"
   [[ "${BENCHMARK_QUERIES}" =~ ^[0-9]+$ ]] || die "压测请求量必须是数字"
+  [[ "${BENCHMARK_WARMUP_ROWS}" =~ ^[0-9]+$ ]] || die "压测预热数据量必须是数字"
+  [[ "${BENCHMARK_PORT}" =~ ^[0-9]+$ ]] || die "压测端口必须是数字"
   [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
   [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
+  [[ "${BENCHMARK_PROFILE}" =~ ^(oltp-readonly|oltp-readwrite|point-select)$ ]] || die "压测模式仅支持 oltp-readonly、oltp-readwrite、point-select"
 
   if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
     die "使用 NFS 备份时必须提供 --backup-nfs-server"
@@ -912,6 +1114,7 @@ print_plan() {
   echo "动作                    : ${ACTION}"
   echo "命名空间                : ${NAMESPACE}"
   echo "StatefulSet             : ${STS_NAME}"
+  echo "认证 Secret             : ${AUTH_SECRET}"
   echo "等待超时                : ${WAIT_TIMEOUT}"
 
   if [[ "${ACTION}" == "addon-install" || "${ACTION}" == "addon-uninstall" ]]; then
@@ -934,7 +1137,15 @@ print_plan() {
     echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
     echo "Fluent Bit              : ${FLUENTBIT_ENABLED}"
     echo "压测能力                : ${BENCHMARK_ENABLED}"
-    echo "业务影响                : install 会整套对齐资源；若 sidecar 或 MySQL 配置变化，可能触发滚动更新"
+    if [[ "${ACTION}" == "install" ]]; then
+      echo "业务影响                : install 会整套对齐资源；若 sidecar 或 MySQL 配置变化，可能触发滚动更新"
+    elif [[ "${ACTION}" == "backup" ]]; then
+      echo "业务影响                : 立即执行一次备份 Job（会校装备份组件）"
+    elif [[ "${ACTION}" == "restore" ]]; then
+      echo "业务影响                : 执行恢复 Job，将快照 SQL 导入当前实例（通常会覆盖同名对象数据）"
+    elif [[ "${ACTION}" == "verify-backup-restore" ]]; then
+      echo "业务影响                : 执行备份+恢复闭环校验，会写入 offline_validation 库用于验证"
+    fi
     if [[ "${FLUENTBIT_ENABLED}" == "true" ]]; then
       echo "慢查询阈值(秒)          : ${MYSQL_SLOW_QUERY_TIME}"
     fi
@@ -959,9 +1170,14 @@ print_plan() {
   fi
   if [[ "${ACTION}" == "benchmark" ]]; then
     echo "报告目录                : ${REPORT_DIR}"
+    echo "压测目标地址            : ${BENCHMARK_HOST}:${BENCHMARK_PORT}"
+    echo "压测账号                : ${BENCHMARK_USER}"
+    echo "认证 Secret             : ${AUTH_SECRET}"
     echo "压测并发                : ${BENCHMARK_CONCURRENCY}"
     echo "压测轮数                : ${BENCHMARK_ITERATIONS}"
     echo "压测请求量              : ${BENCHMARK_QUERIES}"
+    echo "预热数据量              : ${BENCHMARK_WARMUP_ROWS}"
+    echo "压测模式                : ${BENCHMARK_PROFILE}"
   fi
 }
 
@@ -1160,7 +1376,12 @@ template_replace() {
     -e "s#__BENCHMARK_JOB_NAME__#${BENCHMARK_JOB_NAME:-mysql-benchmark}#g" \
     -e "s#__BENCHMARK_CONCURRENCY__#${BENCHMARK_CONCURRENCY}#g" \
     -e "s#__BENCHMARK_ITERATIONS__#${BENCHMARK_ITERATIONS}#g" \
-    -e "s#__BENCHMARK_QUERIES__#${BENCHMARK_QUERIES}#g"
+    -e "s#__BENCHMARK_QUERIES__#${BENCHMARK_QUERIES}#g" \
+    -e "s#__BENCHMARK_WARMUP_ROWS__#${BENCHMARK_WARMUP_ROWS}#g" \
+    -e "s#__BENCHMARK_PROFILE__#${BENCHMARK_PROFILE}#g" \
+    -e "s#__BENCHMARK_HOST__#${BENCHMARK_HOST}#g" \
+    -e "s#__BENCHMARK_PORT__#${BENCHMARK_PORT}#g" \
+    -e "s#__BENCHMARK_USER__#${BENCHMARK_USER}#g"
 }
 
 render_manifest() {
@@ -1676,6 +1897,7 @@ main() {
   prompt_missing_values
   validate_environment
   validate_inputs
+  prepare_runtime_auth_secret
 
   if [[ "${ACTION}" != "status" && "${ACTION}" != "addon-status" ]]; then
     confirm_plan
