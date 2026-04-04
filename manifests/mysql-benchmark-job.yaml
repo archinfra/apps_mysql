@@ -21,51 +21,86 @@ spec:
               export MYSQL_PWD="${MYSQL_ROOT_PASSWORD}"
               mkdir -p /report
               report_file="/report/${BENCHMARK_JOB_NAME}.txt"
+              latency_file="/tmp/latency_ms.log"
+              : > "${latency_file}"
 
-              ops_per_worker=$(( (MYSQL_BENCHMARK_QUERIES + MYSQL_BENCHMARK_CONCURRENCY - 1) / MYSQL_BENCHMARK_CONCURRENCY ))
-              total_operations=$(( ops_per_worker * MYSQL_BENCHMARK_CONCURRENCY * MYSQL_BENCHMARK_ITERATIONS ))
-
-              mysql \
-                --host="${MYSQL_HOST}" \
-                --port="${MYSQL_PORT}" \
-                --protocol=TCP \
-                --user="${MYSQL_USER}" \
-                -e "CREATE DATABASE IF NOT EXISTS offline_benchmark; CREATE TABLE IF NOT EXISTS offline_benchmark.bench_results (id BIGINT PRIMARY KEY AUTO_INCREMENT, worker_id INT NOT NULL, payload VARCHAR(64) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"
-
-              worker_run() {
-                local worker_id="$1"
-                local iteration=1
-
-                while (( iteration <= MYSQL_BENCHMARK_ITERATIONS )); do
-                  local sql_file
-                  sql_file="$(mktemp)"
-
-                  {
-                    echo "USE offline_benchmark;"
-                    local op=1
-                    while (( op <= ops_per_worker )); do
-                      printf "INSERT INTO bench_results(worker_id, payload) VALUES (%s, CONCAT('worker-', %s, '-op-', %s));\n" "${worker_id}" "${worker_id}" "${op}"
-                      printf "SELECT COUNT(*) FROM bench_results;\n"
-                      op=$((op + 1))
-                    done
-                  } > "${sql_file}"
-
-                  mysql \
-                    --host="${MYSQL_HOST}" \
-                    --port="${MYSQL_PORT}" \
-                    --protocol=TCP \
-                    --user="${MYSQL_USER}" < "${sql_file}" >/dev/null
-
-                  rm -f "${sql_file}"
-                  iteration=$((iteration + 1))
-                done
+              mysql_exec() {
+                mysql --host="${MYSQL_HOST}" --port="${MYSQL_PORT}" --protocol=TCP --user="${MYSQL_USER}" -Nse "$1"
               }
+
+              run_timed_sql() {
+                local sql="$1"
+                local start_ns end_ns duration_ms
+                start_ns="$(date +%s%N)"
+                mysql_exec "${sql}" >/dev/null
+                end_ns="$(date +%s%N)"
+                duration_ms=$(( (end_ns - start_ns) / 1000000 ))
+                echo "${duration_ms}" >> "${latency_file}"
+              }
+
+              percentile_from_file() {
+                local file="$1"
+                local p="$2"
+                sort -n "${file}" | awk -v p="${p}" '
+                  {vals[NR]=$1}
+                  END{
+                    if (NR==0) {print 0; exit}
+                    idx=int((p/100.0)*NR); if (idx<1) idx=1; if (idx>NR) idx=NR;
+                    print vals[idx]
+                  }'
+              }
+
+              profile="${MYSQL_BENCHMARK_PROFILE}"
+              mysql_version="$(mysql_exec "SELECT VERSION();")"
+              read_queries=0
+              write_queries=0
+
+              mysql_exec "CREATE DATABASE IF NOT EXISTS offline_benchmark;"
+              mysql_exec "CREATE TABLE IF NOT EXISTS offline_benchmark.bench_kv (id BIGINT PRIMARY KEY, k BIGINT NOT NULL, payload VARCHAR(128) NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, KEY idx_k(k));"
+
+              existing_rows="$(mysql_exec "SELECT COUNT(*) FROM offline_benchmark.bench_kv;")"
+              if (( existing_rows < MYSQL_BENCHMARK_WARMUP_ROWS )); then
+                i=$((existing_rows + 1))
+                while (( i <= MYSQL_BENCHMARK_WARMUP_ROWS )); do
+                  mysql_exec "INSERT INTO offline_benchmark.bench_kv(id,k,payload) VALUES(${i},${i},RPAD(CONCAT('seed-',${i}),128,'x')) ON DUPLICATE KEY UPDATE payload=VALUES(payload);"
+                  i=$((i + 1))
+                done
+              fi
 
               start_epoch="$(date +%s)"
 
               worker=1
               while (( worker <= MYSQL_BENCHMARK_CONCURRENCY )); do
-                worker_run "${worker}" &
+                (
+                  iteration=1
+                  while (( iteration <= MYSQL_BENCHMARK_ITERATIONS )); do
+                    op=1
+                    while (( op <= MYSQL_BENCHMARK_QUERIES )); do
+                      rid=$(( (RANDOM % MYSQL_BENCHMARK_WARMUP_ROWS) + 1 ))
+                      case "${profile}" in
+                        point-select)
+                          run_timed_sql "SELECT payload FROM offline_benchmark.bench_kv WHERE id=${rid};"
+                          read_queries=$((read_queries + 1))
+                          ;;
+                        oltp-readonly)
+                          run_timed_sql "SELECT payload FROM offline_benchmark.bench_kv WHERE id=${rid};"
+                          run_timed_sql "SELECT id,payload FROM offline_benchmark.bench_kv WHERE id BETWEEN ${rid} AND ${rid}+20;"
+                          read_queries=$((read_queries + 2))
+                          ;;
+                        *)
+                          run_timed_sql "SELECT payload FROM offline_benchmark.bench_kv WHERE id=${rid};"
+                          run_timed_sql "SELECT id,payload FROM offline_benchmark.bench_kv WHERE id BETWEEN ${rid} AND ${rid}+20;"
+                          run_timed_sql "UPDATE offline_benchmark.bench_kv SET payload=RPAD(CONCAT('u-',${rid}),128,'y') WHERE id=${rid};"
+                          run_timed_sql "INSERT INTO offline_benchmark.bench_kv(id,k,payload) VALUES(${MYSQL_BENCHMARK_WARMUP_ROWS}+${worker}*1000000+${iteration}*10000+${op},${rid},RPAD('ins',128,'z')) ON DUPLICATE KEY UPDATE k=VALUES(k);"
+                          read_queries=$((read_queries + 2))
+                          write_queries=$((write_queries + 2))
+                          ;;
+                      esac
+                      op=$((op + 1))
+                    done
+                    iteration=$((iteration + 1))
+                  done
+                ) &
                 worker=$((worker + 1))
               done
               wait
@@ -76,27 +111,52 @@ spec:
                 duration=1
               fi
 
-              final_rows="$(
-                mysql \
-                  --host="${MYSQL_HOST}" \
-                  --port="${MYSQL_PORT}" \
-                  --protocol=TCP \
-                  --user="${MYSQL_USER}" \
-                  -Nse "SELECT COUNT(*) FROM offline_benchmark.bench_results"
-              )"
-              throughput=$(( total_operations / duration ))
+              samples="$(wc -l < "${latency_file}")"
+              if (( read_queries == 0 && write_queries == 0 )); then
+                case "${profile}" in
+                  point-select)
+                    read_queries="${samples}"
+                    ;;
+                  oltp-readonly)
+                    read_queries="${samples}"
+                    ;;
+                  *)
+                    read_queries=$(( samples / 2 ))
+                    write_queries=$(( samples - read_queries ))
+                    ;;
+                esac
+              fi
+              total_queries=$(( read_queries + write_queries ))
+              if (( total_queries <= 0 )); then
+                total_queries="${samples}"
+              fi
+              throughput=$(( total_queries / duration ))
+              p50_ms="$(percentile_from_file "${latency_file}" 50)"
+              p95_ms="$(percentile_from_file "${latency_file}" 95)"
+              p99_ms="$(percentile_from_file "${latency_file}" 99)"
+              final_rows="$(mysql_exec "SELECT COUNT(*) FROM offline_benchmark.bench_kv;")"
 
               {
                 echo "mysql benchmark report"
                 echo "generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "mysql_version=${mysql_version}"
                 echo "host=${MYSQL_HOST}"
+                echo "port=${MYSQL_PORT}"
+                echo "user=${MYSQL_USER}"
+                echo "profile=${MYSQL_BENCHMARK_PROFILE}"
                 echo "concurrency=${MYSQL_BENCHMARK_CONCURRENCY}"
                 echo "iterations=${MYSQL_BENCHMARK_ITERATIONS}"
-                echo "requested_queries=${MYSQL_BENCHMARK_QUERIES}"
-                echo "ops_per_worker=${ops_per_worker}"
-                echo "estimated_total_operations=${total_operations}"
+                echo "queries_per_iteration=${MYSQL_BENCHMARK_QUERIES}"
+                echo "warmup_rows=${MYSQL_BENCHMARK_WARMUP_ROWS}"
+                echo "latency_samples=${samples}"
+                echo "read_queries=${read_queries}"
+                echo "write_queries=${write_queries}"
+                echo "total_queries=${total_queries}"
                 echo "duration_seconds=${duration}"
-                echo "throughput_ops_per_sec=${throughput}"
+                echo "throughput_qps=${throughput}"
+                echo "latency_p50_ms=${p50_ms}"
+                echo "latency_p95_ms=${p95_ms}"
+                echo "latency_p99_ms=${p99_ms}"
                 echo "final_row_count=${final_rows}"
                 echo "report_file=${BENCHMARK_JOB_NAME}.txt"
               } | tee "${report_file}"
@@ -104,11 +164,11 @@ spec:
             - name: BENCHMARK_JOB_NAME
               value: "__BENCHMARK_JOB_NAME__"
             - name: MYSQL_HOST
-              value: "__STS_NAME__-0.__SERVICE_NAME__.__NAMESPACE__.svc.cluster.local"
+              value: "__BENCHMARK_HOST__"
             - name: MYSQL_PORT
-              value: "3306"
+              value: "__BENCHMARK_PORT__"
             - name: MYSQL_USER
-              value: "root"
+              value: "__BENCHMARK_USER__"
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -120,6 +180,10 @@ spec:
               value: "__BENCHMARK_ITERATIONS__"
             - name: MYSQL_BENCHMARK_QUERIES
               value: "__BENCHMARK_QUERIES__"
+            - name: MYSQL_BENCHMARK_WARMUP_ROWS
+              value: "__BENCHMARK_WARMUP_ROWS__"
+            - name: MYSQL_BENCHMARK_PROFILE
+              value: "__BENCHMARK_PROFILE__"
           volumeMounts:
             - name: report-storage
               mountPath: /report
