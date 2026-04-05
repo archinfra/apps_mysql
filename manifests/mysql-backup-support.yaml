@@ -84,6 +84,11 @@ data:
     meta_file="${snapshot_dir}/${timestamp}.meta"
 
     mkdir -p "${snapshot_dir}" "${STATUS_DIR}"
+    if ! touch "${snapshot_dir}/.write_test" >/dev/null 2>&1; then
+      echo "[ERROR] snapshot directory is not writable: ${snapshot_dir}"
+      exit 1
+    fi
+    rm -f "${snapshot_dir}/.write_test"
     wait_for_mysql
 
     mapfile -t databases < <(discover_user_databases)
@@ -165,7 +170,12 @@ data:
       if [[ "${snapshot_name}" == "latest" ]]; then
         if [[ -f "${component_root}/latest.txt" ]]; then
           snapshot_name="$(cat "${component_root}/latest.txt")"
-        else
+          if [[ -n "${snapshot_name}" && ! -f "${snapshot_dir}/${snapshot_name}" ]]; then
+            echo "[WARN] latest.txt points to missing snapshot ${snapshot_name}, fallback to latest existing file"
+            snapshot_name=""
+          fi
+        fi
+        if [[ -z "${snapshot_name}" ]]; then
           snapshot_name="$(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r | head -n 1)"
         fi
       fi
