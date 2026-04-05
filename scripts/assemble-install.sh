@@ -3,8 +3,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODULE_ROOT="${ROOT_DIR}/scripts/install"
-ORDER_FILE="${MODULE_ROOT}/module-order.txt"
+MODULE_ROOT="${ROOT_DIR}/scripts/install/modules"
 OUTPUT_FILE="${1:-${ROOT_DIR}/install.sh}"
 TMP_FILE="$(mktemp)"
 
@@ -14,16 +13,13 @@ cleanup() {
 
 trap cleanup EXIT
 
-[[ -f "${ORDER_FILE}" ]] || {
-  echo "module order file not found: ${ORDER_FILE}" >&2
+[[ -d "${MODULE_ROOT}" ]] || {
+  echo "module directory not found: ${MODULE_ROOT}" >&2
   exit 1
 }
 
 : > "${TMP_FILE}"
-while IFS= read -r relative_path || [[ -n "${relative_path}" ]]; do
-  relative_path="${relative_path%$'\r'}"
-  [[ -n "${relative_path}" ]] || continue
-  module_path="${MODULE_ROOT}/${relative_path}"
+while IFS= read -r module_path; do
   [[ -f "${module_path}" ]] || {
     echo "module not found: ${module_path}" >&2
     exit 1
@@ -32,7 +28,8 @@ while IFS= read -r relative_path || [[ -n "${relative_path}" ]]; do
   if [[ "$(tail -c 1 "${module_path}" 2>/dev/null || true)" != $'\n' ]]; then
     printf '\n' >> "${TMP_FILE}"
   fi
-done < "${ORDER_FILE}"
+  printf '\n' >> "${TMP_FILE}"
+done < <(find "${MODULE_ROOT}" -maxdepth 1 -type f -name '*.sh' | LC_ALL=C sort)
 
 mv "${TMP_FILE}" "${OUTPUT_FILE}"
 chmod +x "${OUTPUT_FILE}"

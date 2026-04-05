@@ -37,8 +37,8 @@
   {
     "arch": "amd64",
     "platform": "linux/amd64",
-    "dockerfile": "images/sysbench.Dockerfile",
-    "tag": "sealos.hub:5000/kube4/sysbench:1.0.20-ol9",
+    "pull": "openeuler/sysbench:1.0.20-oe2403sp1",
+    "tag": "sealos.hub:5000/kube4/sysbench:1.0.20-oe2403sp1",
     "tar": "sysbench-amd64.tar"
   },
   {
@@ -79,8 +79,8 @@
   {
     "arch": "arm64",
     "platform": "linux/arm64",
-    "dockerfile": "images/sysbench.Dockerfile",
-    "tag": "sealos.hub:5000/kube4/sysbench:1.0.20-ol9",
+    "pull": "openeuler/sysbench:1.0.20-oe2403sp1",
+    "tag": "sealos.hub:5000/kube4/sysbench:1.0.20-oe2403sp1",
     "tar": "sysbench-arm64.tar"
   }
 ]

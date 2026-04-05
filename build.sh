@@ -10,7 +10,7 @@ MANIFESTS_DIR="${ROOT_DIR}/manifests"
 DIST_DIR="${ROOT_DIR}/dist"
 IMAGE_JSON="${IMAGES_DIR}/image.json"
 ASSEMBLER="${ROOT_DIR}/scripts/assemble-install.sh"
-INSTALL_MODULE_ROOT="${ROOT_DIR}/scripts/install"
+INSTALL_MODULE_ROOT="${ROOT_DIR}/scripts/install/modules"
 
 ARCH="amd64"
 PLATFORM="linux/amd64"
@@ -99,7 +99,8 @@ check_requirements() {
   command -v jq >/dev/null 2>&1 || die "jq is required"
   command -v docker >/dev/null 2>&1 || die "docker is required"
   [[ -f "${ASSEMBLER}" ]] || die "scripts/assemble-install.sh is missing"
-  [[ -f "${INSTALL_MODULE_ROOT}/module-order.txt" ]] || die "scripts/install/module-order.txt is missing"
+  [[ -d "${INSTALL_MODULE_ROOT}" ]] || die "scripts/install/modules is missing"
+  find "${INSTALL_MODULE_ROOT}" -maxdepth 1 -type f -name '*.sh' | grep -q . || die "scripts/install/modules is empty"
   [[ -f "${ROOT_DIR}/install.sh" ]] || die "install.sh is missing"
   [[ -d "${MANIFESTS_DIR}" ]] || die "manifests directory is missing"
   [[ -d "${IMAGES_DIR}" ]] || die "images directory is missing"
@@ -108,7 +109,7 @@ check_requirements() {
 }
 
 assemble_installer() {
-  log "Assembling install.sh from scripts/install"
+  log "Assembling install.sh from scripts/install/modules"
   bash "${ASSEMBLER}" "${ROOT_DIR}/install.sh"
 }
 
