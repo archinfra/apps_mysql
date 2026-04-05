@@ -12,6 +12,7 @@ on:
       - ".github/workflows/build-offline-installer.yml"
       - "build.sh"
       - "install.sh"
+      - "scripts/**"
       - "README.md"
       - "images/**"
       - "manifests/**"
@@ -20,6 +21,7 @@ on:
       - ".github/workflows/build-offline-installer.yml"
       - "build.sh"
       - "install.sh"
+      - "scripts/**"
       - "README.md"
       - "images/**"
       - "manifests/**"
@@ -49,7 +51,7 @@ jobs:
 
       - name: Ensure executable permissions
         run: |
-          chmod +x build.sh install.sh
+          chmod +x build.sh install.sh scripts/assemble-install.sh
 
       - name: Build installer
         run: |

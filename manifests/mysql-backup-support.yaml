@@ -84,6 +84,12 @@ data:
     meta_file="${snapshot_dir}/${timestamp}.meta"
 
     mkdir -p "${snapshot_dir}" "${STATUS_DIR}"
+    probe_file="${snapshot_dir}/.write-test-$$"
+    : > "${probe_file}" || {
+      echo "[ERROR] backup path is not writable: ${snapshot_dir}"
+      exit 1
+    }
+    rm -f "${probe_file}"
     wait_for_mysql
 
     mapfile -t databases < <(discover_user_databases)
@@ -165,6 +171,12 @@ data:
       if [[ "${snapshot_name}" == "latest" ]]; then
         if [[ -f "${component_root}/latest.txt" ]]; then
           snapshot_name="$(cat "${component_root}/latest.txt")"
+          if [[ -n "${snapshot_name}" && "${snapshot_name}" != *.sql.gz ]]; then
+            snapshot_name="${snapshot_name}.sql.gz"
+          fi
+          if [[ -z "${snapshot_name}" || ! -f "${snapshot_dir}/${snapshot_name}" ]]; then
+            snapshot_name="$(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r | head -n 1)"
+          fi
         else
           snapshot_name="$(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r | head -n 1)"
         fi

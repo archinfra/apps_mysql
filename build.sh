@@ -9,6 +9,8 @@ IMAGES_DIR="${ROOT_DIR}/images"
 MANIFESTS_DIR="${ROOT_DIR}/manifests"
 DIST_DIR="${ROOT_DIR}/dist"
 IMAGE_JSON="${IMAGES_DIR}/image.json"
+ASSEMBLER="${ROOT_DIR}/scripts/assemble-install.sh"
+INSTALL_MODULE_ROOT="${ROOT_DIR}/scripts/install"
 
 ARCH="amd64"
 PLATFORM="linux/amd64"
@@ -96,11 +98,18 @@ parse_args() {
 check_requirements() {
   command -v jq >/dev/null 2>&1 || die "jq is required"
   command -v docker >/dev/null 2>&1 || die "docker is required"
+  [[ -f "${ASSEMBLER}" ]] || die "scripts/assemble-install.sh is missing"
+  [[ -f "${INSTALL_MODULE_ROOT}/module-order.txt" ]] || die "scripts/install/module-order.txt is missing"
   [[ -f "${ROOT_DIR}/install.sh" ]] || die "install.sh is missing"
   [[ -d "${MANIFESTS_DIR}" ]] || die "manifests directory is missing"
   [[ -d "${IMAGES_DIR}" ]] || die "images directory is missing"
   [[ -f "${IMAGE_JSON}" ]] || die "images/image.json is missing"
   grep -q '^__PAYLOAD_BELOW__$' "${ROOT_DIR}/install.sh" || die "install.sh is missing __PAYLOAD_BELOW__ marker"
+}
+
+assemble_installer() {
+  log "Assembling install.sh from scripts/install"
+  bash "${ASSEMBLER}" "${ROOT_DIR}/install.sh"
 }
 
 prepare_directories() {
@@ -195,6 +204,7 @@ main() {
   trap cleanup EXIT
   normalize_arch "${ARCH}"
   parse_args "$@"
+  assemble_installer
   check_requirements
 
   if [[ "${BUILD_ALL}" == "true" ]]; then

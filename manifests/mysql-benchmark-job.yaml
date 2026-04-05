@@ -79,21 +79,40 @@ spec:
           image: __SYSBENCH_IMAGE__
           imagePullPolicy: IfNotPresent
           command:
-            - /bin/sh
+            - /bin/bash
             - -lc
             - |
-              set -eu
+              set -euo pipefail
 
               mkdir -p /report /workspace/raw
               report_file="/report/${BENCHMARK_JOB_NAME}.txt"
+              report_json="/report/${BENCHMARK_JOB_NAME}.json"
               : > "${report_file}"
+              : > "${report_json}"
 
               mysql_version="$(cat /workspace/mysql-version.txt)"
               version_family="$(cat /workspace/mysql-version-family.txt)"
               compat_mode="$(cat /workspace/mysql-compat-mode.txt)"
 
-              common_args="--db-driver=mysql --mysql-host=${MYSQL_HOST} --mysql-port=${MYSQL_PORT} --mysql-user=${MYSQL_USER} --mysql-password=${MYSQL_PASSWORD} --mysql-db=${BENCHMARK_DB} --threads=${BENCHMARK_THREADS} --time=${BENCHMARK_TIME} --warmup-time=${BENCHMARK_WARMUP_TIME} --tables=${BENCHMARK_TABLES} --table-size=${BENCHMARK_TABLE_SIZE} --rand-type=${BENCHMARK_RAND_TYPE} --report-interval=10 --histogram=on"
+              base_args="--db-driver=mysql --mysql-host=${MYSQL_HOST} --mysql-port=${MYSQL_PORT} --mysql-user=${MYSQL_USER} --mysql-password=${MYSQL_PASSWORD} --mysql-db=${BENCHMARK_DB} --threads=${BENCHMARK_THREADS} --rand-type=${BENCHMARK_RAND_TYPE} --report-interval=10 --histogram=on"
+              common_args="${base_args} --time=${BENCHMARK_TIME} --warmup-time=${BENCHMARK_WARMUP_TIME} --tables=${BENCHMARK_TABLES} --table-size=${BENCHMARK_TABLE_SIZE}"
               compat_args="--db-ps-mode=disable --mysql-storage-engine=innodb"
+              if [[ "${version_family}" == "mysql80plus" ]]; then
+                compat_args="${compat_args} --mysql-ignore-errors=all"
+              fi
+
+              json_escape() {
+                printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+              }
+
+              numeric_or_zero() {
+                local value="${1:-}"
+                if [[ -n "${value}" ]]; then
+                  printf '%s' "${value}"
+                else
+                  printf '0'
+                fi
+              }
 
               profile_to_script() {
                 case "$1" in
@@ -159,6 +178,27 @@ spec:
                   }' "$1"
               }
 
+              histogram_json() {
+                awk '
+                  BEGIN { in_hist=0; first=1; printf "[" }
+                  /^Latency histogram/ { in_hist=1; next }
+                  in_hist && $1 == "value" { next }
+                  in_hist {
+                    if (match($0, /^[[:space:]]*([0-9.]+)[[:space:]]+\|.*[[:space:]]([0-9]+)[[:space:]]*$/, m)) {
+                      if (!first) {
+                        printf ","
+                      }
+                      printf "{\"value_ms\":%s,\"count\":%s}", m[1], m[2]
+                      first=0
+                      next
+                    }
+                    if ($0 !~ /^[[:space:]]*[0-9.]+[[:space:]]+\|/) {
+                      in_hist=0
+                    }
+                  }
+                  END { printf "]" }' "$1"
+              }
+
               append_profile_report() {
                 local label="$1"
                 local raw_file="$2"
@@ -197,6 +237,75 @@ spec:
                 } >> "${report_file}"
               }
 
+              json_profile_count=0
+              cat > "${report_json}" <<EOF
+{
+  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "mysql_version": "$(json_escape "${mysql_version}")",
+  "version_family": "$(json_escape "${version_family}")",
+  "compat_mode": "$(json_escape "${compat_mode}")",
+  "host": "$(json_escape "${MYSQL_HOST}")",
+  "port": ${MYSQL_PORT},
+  "user": "$(json_escape "${MYSQL_USER}")",
+  "benchmark_profile": "$(json_escape "${BENCHMARK_PROFILE}")",
+  "threads": ${BENCHMARK_THREADS},
+  "time_seconds": ${BENCHMARK_TIME},
+  "warmup_seconds": ${BENCHMARK_WARMUP_TIME},
+  "warmup_rows": ${BENCHMARK_WARMUP_ROWS},
+  "tables": ${BENCHMARK_TABLES},
+  "table_size": ${BENCHMARK_TABLE_SIZE},
+  "benchmark_db": "$(json_escape "${BENCHMARK_DB}")",
+  "rand_type": "$(json_escape "${BENCHMARK_RAND_TYPE}")",
+  "keep_data": "$(json_escape "${BENCHMARK_KEEP_DATA}")",
+  "profiles": [
+EOF
+
+              append_profile_json() {
+                local label="$1"
+                local raw_file="$2"
+                local transactions tps queries qps total_time events lat_min lat_avg lat_max p95_native p50_hist p95_hist p99_hist histogram
+
+                transactions="$(extract_metric "${raw_file}" '^[[:space:]]*transactions:')"
+                tps="$(extract_rate "${raw_file}" '^[[:space:]]*transactions:')"
+                queries="$(extract_metric "${raw_file}" '^[[:space:]]*queries:')"
+                qps="$(extract_rate "${raw_file}" '^[[:space:]]*queries:')"
+                total_time="$(extract_metric "${raw_file}" '^[[:space:]]*total time:')"
+                events="$(extract_metric "${raw_file}" '^[[:space:]]*total number of events:')"
+                lat_min="$(extract_metric "${raw_file}" '^[[:space:]]*min:')"
+                lat_avg="$(extract_metric "${raw_file}" '^[[:space:]]*avg:')"
+                lat_max="$(extract_metric "${raw_file}" '^[[:space:]]*max:')"
+                p95_native="$(extract_metric "${raw_file}" '^[[:space:]]*95th percentile:')"
+                p50_hist="$(hist_percentile "${raw_file}" 50)"
+                p95_hist="$(hist_percentile "${raw_file}" 95)"
+                p99_hist="$(hist_percentile "${raw_file}" 99)"
+                histogram="$(histogram_json "${raw_file}")"
+
+                if (( json_profile_count > 0 )); then
+                  printf ',\n' >> "${report_json}"
+                fi
+
+                cat >> "${report_json}" <<EOF
+    {
+      "label": "$(json_escape "${label}")",
+      "transactions_total": $(numeric_or_zero "${transactions}"),
+      "transactions_per_sec": $(numeric_or_zero "${tps}"),
+      "queries_total": $(numeric_or_zero "${queries}"),
+      "queries_per_sec": $(numeric_or_zero "${qps}"),
+      "total_time_seconds": $(numeric_or_zero "${total_time}"),
+      "events_total": $(numeric_or_zero "${events}"),
+      "latency_min_ms": $(numeric_or_zero "${lat_min}"),
+      "latency_avg_ms": $(numeric_or_zero "${lat_avg}"),
+      "latency_max_ms": $(numeric_or_zero "${lat_max}"),
+      "latency_p50_ms": $(numeric_or_zero "${p50_hist}"),
+      "latency_p95_ms": $(numeric_or_zero "${p95_hist}"),
+      "latency_p95_native_ms": $(numeric_or_zero "${p95_native}"),
+      "latency_p99_ms": $(numeric_or_zero "${p99_hist}"),
+      "latency_histogram": ${histogram}
+    }
+EOF
+                json_profile_count=$((json_profile_count + 1))
+              }
+
               run_profile() {
                 local profile_label="$1"
                 local script_name="$2"
@@ -205,10 +314,34 @@ spec:
                 echo "[INFO] running profile=${profile_label}" | tee -a "${report_file}"
                 sysbench ${common_args} ${compat_args} "${script_name}" run | tee "${raw_file}"
                 append_profile_report "${profile_label}" "${raw_file}"
+                append_profile_json "${profile_label}" "${raw_file}"
               }
 
               prepare_script="oltp_read_write"
               cleanup_script="oltp_read_write"
+
+              run_small_warmup() {
+                local warmup_rows="${BENCHMARK_WARMUP_ROWS}"
+                local warmup_args
+
+                if (( warmup_rows <= 0 )); then
+                  return 0
+                fi
+                if (( warmup_rows > BENCHMARK_TABLE_SIZE )); then
+                  warmup_rows="${BENCHMARK_TABLE_SIZE}"
+                fi
+                if (( warmup_rows <= 0 || warmup_rows >= BENCHMARK_TABLE_SIZE )); then
+                  return 0
+                fi
+
+                warmup_args="${base_args} --time=${BENCHMARK_WARMUP_TIME} --warmup-time=0 --tables=${BENCHMARK_TABLES} --table-size=${warmup_rows}"
+                echo "[INFO] preparing warmup dataset (${warmup_rows} rows/table)" | tee -a "${report_file}"
+                sysbench ${warmup_args} ${compat_args} "${prepare_script}" prepare
+                echo "[INFO] running warmup workload on small dataset" | tee -a "${report_file}"
+                sysbench ${warmup_args} ${compat_args} "oltp_read_write" run > /workspace/raw/warmup.log
+                echo "[INFO] cleaning warmup dataset" | tee -a "${report_file}"
+                sysbench ${warmup_args} ${compat_args} "${cleanup_script}" cleanup
+              }
 
               {
                 echo "mysql benchmark report"
@@ -223,6 +356,7 @@ spec:
                 echo "threads=${BENCHMARK_THREADS}"
                 echo "time_seconds=${BENCHMARK_TIME}"
                 echo "warmup_seconds=${BENCHMARK_WARMUP_TIME}"
+                echo "warmup_rows=${BENCHMARK_WARMUP_ROWS}"
                 echo "tables=${BENCHMARK_TABLES}"
                 echo "table_size=${BENCHMARK_TABLE_SIZE}"
                 echo "benchmark_db=${BENCHMARK_DB}"
@@ -230,6 +364,8 @@ spec:
                 echo "keep_data=${BENCHMARK_KEEP_DATA}"
                 echo
               } >> "${report_file}"
+
+              run_small_warmup
 
               echo "[INFO] preparing benchmark dataset" | tee -a "${report_file}"
               sysbench ${common_args} ${compat_args} "${prepare_script}" prepare
@@ -246,13 +382,20 @@ spec:
                   ;;
               esac
 
-              if [ "${BENCHMARK_KEEP_DATA}" != "true" ]; then
+              if [[ "${BENCHMARK_KEEP_DATA}" != "true" ]]; then
                 echo "[INFO] cleaning benchmark dataset" | tee -a "${report_file}"
                 sysbench ${common_args} ${compat_args} "${cleanup_script}" cleanup
                 echo "[INFO] benchmark dataset cleaned" | tee -a "${report_file}"
               fi
 
+              printf '\n  ]\n}\n' >> "${report_json}"
+
+              echo "__MYSQL_BENCHMARK_REPORT_TEXT_START__"
               cat "${report_file}"
+              echo "__MYSQL_BENCHMARK_REPORT_TEXT_END__"
+              echo "__MYSQL_BENCHMARK_REPORT_JSON_START__"
+              cat "${report_json}"
+              echo "__MYSQL_BENCHMARK_REPORT_JSON_END__"
           env:
             - name: BENCHMARK_JOB_NAME
               value: "__BENCHMARK_JOB_NAME__"
@@ -275,6 +418,8 @@ spec:
               value: "__BENCHMARK_TIME__"
             - name: BENCHMARK_WARMUP_TIME
               value: "__BENCHMARK_WARMUP_TIME__"
+            - name: BENCHMARK_WARMUP_ROWS
+              value: "__BENCHMARK_WARMUP_ROWS__"
             - name: BENCHMARK_TABLES
               value: "__BENCHMARK_TABLES__"
             - name: BENCHMARK_TABLE_SIZE
