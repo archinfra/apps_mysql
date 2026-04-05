@@ -8,8 +8,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      containers:
-        - name: mysql-benchmark
+      initContainers:
+        - name: mysql-prepare
           image: __MYSQL_IMAGE__
           imagePullPolicy: IfNotPresent
           command:
@@ -18,175 +18,280 @@ spec:
             - |
               set -euo pipefail
 
-              export MYSQL_PWD="${MYSQL_ROOT_PASSWORD}"
-              mkdir -p /report
-              report_file="/report/${BENCHMARK_JOB_NAME}.txt"
-              latency_file="/tmp/latency_ms.log"
-              : > "${latency_file}"
+              export MYSQL_PWD="${MYSQL_PASSWORD}"
 
-              mysql_exec() {
-                mysql --host="${MYSQL_HOST}" --port="${MYSQL_PORT}" --protocol=TCP --user="${MYSQL_USER}" -Nse "$1"
-              }
-
-              run_timed_sql() {
-                local sql="$1"
-                local start_ns end_ns duration_ms
-                start_ns="$(date +%s%N)"
-                mysql_exec "${sql}" >/dev/null
-                end_ns="$(date +%s%N)"
-                duration_ms=$(( (end_ns - start_ns) / 1000000 ))
-                echo "${duration_ms}" >> "${latency_file}"
-              }
-
-              percentile_from_file() {
-                local file="$1"
-                local p="$2"
-                sort -n "${file}" | awk -v p="${p}" '
-                  {vals[NR]=$1}
-                  END{
-                    if (NR==0) {print 0; exit}
-                    idx=int((p/100.0)*NR); if (idx<1) idx=1; if (idx>NR) idx=NR;
-                    print vals[idx]
-                  }'
-              }
-
-              profile="${MYSQL_BENCHMARK_PROFILE}"
-              mysql_version="$(mysql_exec "SELECT VERSION();")"
-              read_queries=0
-              write_queries=0
-
-              mysql_exec "CREATE DATABASE IF NOT EXISTS offline_benchmark;"
-              mysql_exec "CREATE TABLE IF NOT EXISTS offline_benchmark.bench_kv (id BIGINT PRIMARY KEY, k BIGINT NOT NULL, payload VARCHAR(128) NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, KEY idx_k(k));"
-
-              existing_rows="$(mysql_exec "SELECT COUNT(*) FROM offline_benchmark.bench_kv;")"
-              if (( existing_rows < MYSQL_BENCHMARK_WARMUP_ROWS )); then
-                i=$((existing_rows + 1))
-                while (( i <= MYSQL_BENCHMARK_WARMUP_ROWS )); do
-                  mysql_exec "INSERT INTO offline_benchmark.bench_kv(id,k,payload) VALUES(${i},${i},RPAD(CONCAT('seed-',${i}),128,'x')) ON DUPLICATE KEY UPDATE payload=VALUES(payload);"
-                  i=$((i + 1))
+              wait_for_mysql() {
+                local retries=60
+                local attempt=1
+                while (( attempt <= retries )); do
+                  if mysqladmin \
+                    --host="${MYSQL_HOST}" \
+                    --port="${MYSQL_PORT}" \
+                    --protocol=TCP \
+                    --user="${MYSQL_USER}" \
+                    ping >/dev/null 2>&1; then
+                    return 0
+                  fi
+                  echo "[WARN] mysql is not ready yet, retry ${attempt}/${retries}"
+                  sleep 5
+                  ((attempt++))
                 done
-              fi
+                echo "[ERROR] mysql is not reachable"
+                exit 1
+              }
 
-              start_epoch="$(date +%s)"
+              wait_for_mysql
+              mysql --host="${MYSQL_HOST}" --port="${MYSQL_PORT}" --protocol=TCP --user="${MYSQL_USER}" \
+                -e "CREATE DATABASE IF NOT EXISTS \`${BENCHMARK_DB}\`;"
 
-              worker=1
-              while (( worker <= MYSQL_BENCHMARK_CONCURRENCY )); do
-                (
-                  iteration=1
-                  while (( iteration <= MYSQL_BENCHMARK_ITERATIONS )); do
-                    op=1
-                    while (( op <= MYSQL_BENCHMARK_QUERIES )); do
-                      rid=$(( (RANDOM % MYSQL_BENCHMARK_WARMUP_ROWS) + 1 ))
-                      case "${profile}" in
-                        point-select)
-                          run_timed_sql "SELECT payload FROM offline_benchmark.bench_kv WHERE id=${rid};"
-                          read_queries=$((read_queries + 1))
-                          ;;
-                        oltp-readonly)
-                          run_timed_sql "SELECT payload FROM offline_benchmark.bench_kv WHERE id=${rid};"
-                          run_timed_sql "SELECT id,payload FROM offline_benchmark.bench_kv WHERE id BETWEEN ${rid} AND ${rid}+20;"
-                          read_queries=$((read_queries + 2))
-                          ;;
-                        *)
-                          run_timed_sql "SELECT payload FROM offline_benchmark.bench_kv WHERE id=${rid};"
-                          run_timed_sql "SELECT id,payload FROM offline_benchmark.bench_kv WHERE id BETWEEN ${rid} AND ${rid}+20;"
-                          run_timed_sql "UPDATE offline_benchmark.bench_kv SET payload=RPAD(CONCAT('u-',${rid}),128,'y') WHERE id=${rid};"
-                          run_timed_sql "INSERT INTO offline_benchmark.bench_kv(id,k,payload) VALUES(${MYSQL_BENCHMARK_WARMUP_ROWS}+${worker}*1000000+${iteration}*10000+${op},${rid},RPAD('ins',128,'z')) ON DUPLICATE KEY UPDATE k=VALUES(k);"
-                          read_queries=$((read_queries + 2))
-                          write_queries=$((write_queries + 2))
-                          ;;
-                      esac
-                      op=$((op + 1))
-                    done
-                    iteration=$((iteration + 1))
-                  done
-                ) &
-                worker=$((worker + 1))
-              done
-              wait
+              version="$(mysql --host="${MYSQL_HOST}" --port="${MYSQL_PORT}" --protocol=TCP --user="${MYSQL_USER}" -Nse "SELECT VERSION();")"
+              family="mysql80plus"
+              compat_mode="mysql80plus-oltp"
+              case "${version}" in
+                5.7.*)
+                  family="mysql57"
+                  compat_mode="mysql57-oltp"
+                  ;;
+              esac
 
-              end_epoch="$(date +%s)"
-              duration=$(( end_epoch - start_epoch ))
-              if (( duration <= 0 )); then
-                duration=1
-              fi
+              printf '%s\n' "${version}" > /workspace/mysql-version.txt
+              printf '%s\n' "${family}" > /workspace/mysql-version-family.txt
+              printf '%s\n' "${compat_mode}" > /workspace/mysql-compat-mode.txt
+          env:
+            - name: MYSQL_HOST
+              value: "__MYSQL_HOST__"
+            - name: MYSQL_PORT
+              value: "__MYSQL_PORT__"
+            - name: MYSQL_USER
+              value: "__MYSQL_USER__"
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: __MYSQL_AUTH_SECRET__
+                  key: __MYSQL_PASSWORD_KEY__
+            - name: BENCHMARK_DB
+              value: "__BENCHMARK_DB__"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: mysql-benchmark
+          image: __SYSBENCH_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -lc
+            - |
+              set -eu
 
-              samples="$(wc -l < "${latency_file}")"
-              if (( read_queries == 0 && write_queries == 0 )); then
-                case "${profile}" in
-                  point-select)
-                    read_queries="${samples}"
-                    ;;
-                  oltp-readonly)
-                    read_queries="${samples}"
-                    ;;
-                  *)
-                    read_queries=$(( samples / 2 ))
-                    write_queries=$(( samples - read_queries ))
-                    ;;
+              mkdir -p /report /workspace/raw
+              report_file="/report/${BENCHMARK_JOB_NAME}.txt"
+              : > "${report_file}"
+
+              mysql_version="$(cat /workspace/mysql-version.txt)"
+              version_family="$(cat /workspace/mysql-version-family.txt)"
+              compat_mode="$(cat /workspace/mysql-compat-mode.txt)"
+
+              common_args="--db-driver=mysql --mysql-host=${MYSQL_HOST} --mysql-port=${MYSQL_PORT} --mysql-user=${MYSQL_USER} --mysql-password=${MYSQL_PASSWORD} --mysql-db=${BENCHMARK_DB} --threads=${BENCHMARK_THREADS} --time=${BENCHMARK_TIME} --warmup-time=${BENCHMARK_WARMUP_TIME} --tables=${BENCHMARK_TABLES} --table-size=${BENCHMARK_TABLE_SIZE} --rand-type=${BENCHMARK_RAND_TYPE} --report-interval=10 --histogram=on"
+              compat_args="--db-ps-mode=disable --mysql-storage-engine=innodb"
+
+              profile_to_script() {
+                case "$1" in
+                  oltp-point-select) echo "oltp_point_select" ;;
+                  oltp-read-only) echo "oltp_read_only" ;;
+                  oltp-read-write) echo "oltp_read_write" ;;
+                  *) echo "$1" ;;
                 esac
-              fi
-              total_queries=$(( read_queries + write_queries ))
-              if (( total_queries <= 0 )); then
-                total_queries="${samples}"
-              fi
-              throughput=$(( total_queries / duration ))
-              p50_ms="$(percentile_from_file "${latency_file}" 50)"
-              p95_ms="$(percentile_from_file "${latency_file}" 95)"
-              p99_ms="$(percentile_from_file "${latency_file}" 99)"
-              final_rows="$(mysql_exec "SELECT COUNT(*) FROM offline_benchmark.bench_kv;")"
+              }
+
+              extract_metric() {
+                awk -v prefix="$2" '
+                  $0 ~ prefix {
+                    line=$0
+                    sub(/^.*:[[:space:]]*/, "", line)
+                    split(line, parts, /[[:space:]]+/)
+                    print parts[1]
+                    exit
+                  }' "$1"
+              }
+
+              extract_rate() {
+                awk -v prefix="$2" '
+                  $0 ~ prefix {
+                    if (match($0, /\(([0-9.]+) per sec\.\)/, m)) {
+                      print m[1]
+                      exit
+                    }
+                  }' "$1"
+              }
+
+              hist_percentile() {
+                awk -v pct="$2" '
+                  BEGIN { in_hist=0; total=0; n=0 }
+                  /^Latency histogram/ { in_hist=1; next }
+                  in_hist && $1 == "value" { next }
+                  in_hist {
+                    if (match($0, /^[[:space:]]*([0-9.]+)[[:space:]]+\|.*[[:space:]]([0-9]+)[[:space:]]*$/, m)) {
+                      vals[++n]=m[1]
+                      counts[n]=m[2]
+                      total+=m[2]
+                      next
+                    }
+                    if (n > 0 && $0 !~ /^[[:space:]]*[0-9.]+[[:space:]]+\|/) {
+                      in_hist=0
+                    }
+                  }
+                  END {
+                    if (total == 0) {
+                      print 0
+                      exit
+                    }
+                    threshold = total * pct / 100.0
+                    cum = 0
+                    for (i = 1; i <= n; i++) {
+                      cum += counts[i]
+                      if (cum >= threshold) {
+                        print vals[i]
+                        exit
+                      }
+                    }
+                    print vals[n]
+                  }' "$1"
+              }
+
+              append_profile_report() {
+                local label="$1"
+                local raw_file="$2"
+                local transactions tps queries qps total_time events lat_min lat_avg lat_max p95_native p50_hist p95_hist p99_hist
+
+                transactions="$(extract_metric "${raw_file}" '^[[:space:]]*transactions:')"
+                tps="$(extract_rate "${raw_file}" '^[[:space:]]*transactions:')"
+                queries="$(extract_metric "${raw_file}" '^[[:space:]]*queries:')"
+                qps="$(extract_rate "${raw_file}" '^[[:space:]]*queries:')"
+                total_time="$(extract_metric "${raw_file}" '^[[:space:]]*total time:')"
+                events="$(extract_metric "${raw_file}" '^[[:space:]]*total number of events:')"
+                lat_min="$(extract_metric "${raw_file}" '^[[:space:]]*min:')"
+                lat_avg="$(extract_metric "${raw_file}" '^[[:space:]]*avg:')"
+                lat_max="$(extract_metric "${raw_file}" '^[[:space:]]*max:')"
+                p95_native="$(extract_metric "${raw_file}" '^[[:space:]]*95th percentile:')"
+                p50_hist="$(hist_percentile "${raw_file}" 50)"
+                p95_hist="$(hist_percentile "${raw_file}" 95)"
+                p99_hist="$(hist_percentile "${raw_file}" 99)"
+
+                {
+                  echo "[profile:${label}]"
+                  echo "transactions_total=${transactions}"
+                  echo "transactions_per_sec=${tps}"
+                  echo "queries_total=${queries}"
+                  echo "queries_per_sec=${qps}"
+                  echo "total_time_seconds=${total_time}"
+                  echo "events_total=${events}"
+                  echo "latency_min_ms=${lat_min}"
+                  echo "latency_avg_ms=${lat_avg}"
+                  echo "latency_max_ms=${lat_max}"
+                  echo "latency_p50_ms=${p50_hist}"
+                  echo "latency_p95_ms=${p95_hist}"
+                  echo "latency_p95_native_ms=${p95_native}"
+                  echo "latency_p99_ms=${p99_hist}"
+                  echo
+                } >> "${report_file}"
+              }
+
+              run_profile() {
+                local profile_label="$1"
+                local script_name="$2"
+                local raw_file="/workspace/raw/${profile_label}.log"
+
+                echo "[INFO] running profile=${profile_label}" | tee -a "${report_file}"
+                sysbench ${common_args} ${compat_args} "${script_name}" run | tee "${raw_file}"
+                append_profile_report "${profile_label}" "${raw_file}"
+              }
+
+              prepare_script="oltp_read_write"
+              cleanup_script="oltp_read_write"
 
               {
                 echo "mysql benchmark report"
                 echo "generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                 echo "mysql_version=${mysql_version}"
+                echo "version_family=${version_family}"
+                echo "compat_mode=${compat_mode}"
                 echo "host=${MYSQL_HOST}"
                 echo "port=${MYSQL_PORT}"
                 echo "user=${MYSQL_USER}"
-                echo "profile=${MYSQL_BENCHMARK_PROFILE}"
-                echo "concurrency=${MYSQL_BENCHMARK_CONCURRENCY}"
-                echo "iterations=${MYSQL_BENCHMARK_ITERATIONS}"
-                echo "queries_per_iteration=${MYSQL_BENCHMARK_QUERIES}"
-                echo "warmup_rows=${MYSQL_BENCHMARK_WARMUP_ROWS}"
-                echo "latency_samples=${samples}"
-                echo "read_queries=${read_queries}"
-                echo "write_queries=${write_queries}"
-                echo "total_queries=${total_queries}"
-                echo "duration_seconds=${duration}"
-                echo "throughput_qps=${throughput}"
-                echo "latency_p50_ms=${p50_ms}"
-                echo "latency_p95_ms=${p95_ms}"
-                echo "latency_p99_ms=${p99_ms}"
-                echo "final_row_count=${final_rows}"
-                echo "report_file=${BENCHMARK_JOB_NAME}.txt"
-              } | tee "${report_file}"
+                echo "benchmark_profile=${BENCHMARK_PROFILE}"
+                echo "threads=${BENCHMARK_THREADS}"
+                echo "time_seconds=${BENCHMARK_TIME}"
+                echo "warmup_seconds=${BENCHMARK_WARMUP_TIME}"
+                echo "tables=${BENCHMARK_TABLES}"
+                echo "table_size=${BENCHMARK_TABLE_SIZE}"
+                echo "benchmark_db=${BENCHMARK_DB}"
+                echo "rand_type=${BENCHMARK_RAND_TYPE}"
+                echo "keep_data=${BENCHMARK_KEEP_DATA}"
+                echo
+              } >> "${report_file}"
+
+              echo "[INFO] preparing benchmark dataset" | tee -a "${report_file}"
+              sysbench ${common_args} ${compat_args} "${prepare_script}" prepare
+              echo "[INFO] benchmark dataset prepared" | tee -a "${report_file}"
+
+              case "${BENCHMARK_PROFILE}" in
+                standard)
+                  run_profile "oltp-point-select" "$(profile_to_script oltp-point-select)"
+                  run_profile "oltp-read-only" "$(profile_to_script oltp-read-only)"
+                  run_profile "oltp-read-write" "$(profile_to_script oltp-read-write)"
+                  ;;
+                *)
+                  run_profile "${BENCHMARK_PROFILE}" "$(profile_to_script "${BENCHMARK_PROFILE}")"
+                  ;;
+              esac
+
+              if [ "${BENCHMARK_KEEP_DATA}" != "true" ]; then
+                echo "[INFO] cleaning benchmark dataset" | tee -a "${report_file}"
+                sysbench ${common_args} ${compat_args} "${cleanup_script}" cleanup
+                echo "[INFO] benchmark dataset cleaned" | tee -a "${report_file}"
+              fi
+
+              cat "${report_file}"
           env:
             - name: BENCHMARK_JOB_NAME
               value: "__BENCHMARK_JOB_NAME__"
             - name: MYSQL_HOST
-              value: "__BENCHMARK_HOST__"
+              value: "__MYSQL_HOST__"
             - name: MYSQL_PORT
-              value: "__BENCHMARK_PORT__"
+              value: "__MYSQL_PORT__"
             - name: MYSQL_USER
-              value: "__BENCHMARK_USER__"
-            - name: MYSQL_ROOT_PASSWORD
+              value: "__MYSQL_USER__"
+            - name: MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: __AUTH_SECRET__
-                  key: mysql-root-password
-            - name: MYSQL_BENCHMARK_CONCURRENCY
-              value: "__BENCHMARK_CONCURRENCY__"
-            - name: MYSQL_BENCHMARK_ITERATIONS
-              value: "__BENCHMARK_ITERATIONS__"
-            - name: MYSQL_BENCHMARK_QUERIES
-              value: "__BENCHMARK_QUERIES__"
-            - name: MYSQL_BENCHMARK_WARMUP_ROWS
-              value: "__BENCHMARK_WARMUP_ROWS__"
-            - name: MYSQL_BENCHMARK_PROFILE
+                  name: __MYSQL_AUTH_SECRET__
+                  key: __MYSQL_PASSWORD_KEY__
+            - name: BENCHMARK_PROFILE
               value: "__BENCHMARK_PROFILE__"
+            - name: BENCHMARK_THREADS
+              value: "__BENCHMARK_THREADS__"
+            - name: BENCHMARK_TIME
+              value: "__BENCHMARK_TIME__"
+            - name: BENCHMARK_WARMUP_TIME
+              value: "__BENCHMARK_WARMUP_TIME__"
+            - name: BENCHMARK_TABLES
+              value: "__BENCHMARK_TABLES__"
+            - name: BENCHMARK_TABLE_SIZE
+              value: "__BENCHMARK_TABLE_SIZE__"
+            - name: BENCHMARK_DB
+              value: "__BENCHMARK_DB__"
+            - name: BENCHMARK_RAND_TYPE
+              value: "__BENCHMARK_RAND_TYPE__"
+            - name: BENCHMARK_KEEP_DATA
+              value: "__BENCHMARK_KEEP_DATA__"
           volumeMounts:
+            - name: workspace
+              mountPath: /workspace
             - name: report-storage
               mountPath: /report
       volumes:
+        - name: workspace
+          emptyDir: {}
         - name: report-storage
           emptyDir: {}

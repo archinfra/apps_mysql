@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.5.0"
+APP_VERSION="1.5.1"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
 MANIFEST_DIR="${WORKDIR}/manifests"
@@ -11,6 +11,8 @@ MANIFEST_DIR="${WORKDIR}/manifests"
 IMAGE_JSON="${IMAGE_DIR}/image.json"
 MYSQL_MANIFEST="${MANIFEST_DIR}/innodb-mysql.yaml"
 BACKUP_MANIFEST="${MANIFEST_DIR}/mysql-backup.yaml"
+BACKUP_SUPPORT_MANIFEST="${MANIFEST_DIR}/mysql-backup-support.yaml"
+BACKUP_JOB_MANIFEST="${MANIFEST_DIR}/mysql-backup-job.yaml"
 RESTORE_MANIFEST="${MANIFEST_DIR}/mysql-restore-job.yaml"
 BENCHMARK_MANIFEST="${MANIFEST_DIR}/mysql-benchmark-job.yaml"
 MONITORING_ADDON_MANIFEST="${MANIFEST_DIR}/mysql-addon-monitoring.yaml"
@@ -30,6 +32,21 @@ STORAGE_SIZE="10Gi"
 SERVICE_NAME="mysql"
 STS_NAME="mysql"
 AUTH_SECRET="mysql-auth"
+MYSQL_HOST=""
+MYSQL_PORT="3306"
+MYSQL_USER="root"
+MYSQL_PASSWORD=""
+MYSQL_AUTH_SECRET=""
+MYSQL_PASSWORD_KEY=""
+MYSQL_TARGET_NAME=""
+MYSQL_RESTORE_MODE="merge"
+MYSQL_RUNTIME_SECRET="mysql-runtime-auth"
+MYSQL_ROOT_PASSWORD_EXPLICIT="false"
+MYSQL_PASSWORD_EXPLICIT="false"
+MYSQL_AUTH_SECRET_EXPLICIT="false"
+MYSQL_PASSWORD_KEY_EXPLICIT="false"
+MYSQL_HOST_EXPLICIT="false"
+MYSQL_TARGET_NAME_EXPLICIT="false"
 PROBE_CONFIGMAP="mysql-probes"
 INIT_CONFIGMAP="mysql-init-users"
 MYSQL_CONFIGMAP="mysql-config"
@@ -55,6 +72,7 @@ ADDON_EXPORTER_SECRET="mysql-exporter-auth"
 ADDON_EXPORTER_USERNAME="mysqld_exporter"
 ADDON_EXPORTER_PASSWORD="exporter@passw0rd"
 ADDON_MONITORING_TARGET=""
+ADDON_MONITORING_TARGET_EXPLICIT="false"
 ADDON_SERVICE_MONITOR_NAME="mysql-exporter-monitor"
 FLUENTBIT_CONFIGMAP="mysql-fluent-bit"
 MYSQL_SLOW_QUERY_TIME="2"
@@ -71,6 +89,7 @@ S3_SECRET_KEY=""
 S3_INSECURE="false"
 RESTORE_SNAPSHOT="latest"
 WAIT_TIMEOUT="10m"
+WAIT_TIMEOUT_EXPLICIT="false"
 AUTO_YES="false"
 DELETE_PVC="false"
 SKIP_IMAGE_PREPARE="false"
@@ -79,7 +98,15 @@ BENCHMARK_CONCURRENCY="32"
 BENCHMARK_ITERATIONS="3"
 BENCHMARK_QUERIES="2000"
 BENCHMARK_WARMUP_ROWS="10000"
-BENCHMARK_PROFILE="oltp-readwrite"
+BENCHMARK_THREADS="32"
+BENCHMARK_TIME="180"
+BENCHMARK_WARMUP_TIME="30"
+BENCHMARK_TABLES="8"
+BENCHMARK_TABLE_SIZE="100000"
+BENCHMARK_DB="sbtest"
+BENCHMARK_RAND_TYPE="uniform"
+BENCHMARK_KEEP_DATA="false"
+BENCHMARK_PROFILE="standard"
 BENCHMARK_HOST=""
 BENCHMARK_PORT="3306"
 BENCHMARK_USER="root"
@@ -667,6 +694,520 @@ show_help() {
   esac
 }
 
+show_help_overview() {
+  cat <<'EOF'
+用法:
+  ./mysql-installer.run <动作> [参数]
+  ./mysql-installer.run help [主题]
+
+动作:
+  install                 安装或整套对齐 MySQL 及内嵌能力
+  uninstall               卸载资源，默认保留 PVC
+  status                  查看当前资源状态
+  addon-install           给已有 MySQL 单独补齐外置能力
+  addon-uninstall         单独移除外置能力
+  addon-status            查看 addon 状态与影响边界
+  backup                  立即执行一次备份 Job
+  restore                 立即执行一次恢复 Job
+  verify-backup-restore   执行备份/恢复闭环校验
+  benchmark               执行工程化压测
+  help                    查看中文帮助
+
+help 主题:
+  overview
+  install
+  addons
+  backup
+  restore
+  benchmark
+  params
+  backup-restore
+  logging
+  architecture
+  examples
+
+关键设计:
+  1. install 是“整套声明式对齐”，不是一次性初始化脚本。
+  2. addon-install 面向“已有 MySQL 补能力”，尽量只新增资源，不改 MySQL StatefulSet。
+  3. backup 是“立刻备份一次”，addon-install --addons backup 才是“安装定时备份组件”。
+  4. 日志默认推荐平台层 DaemonSet Fluent Bit + ES/OpenSearch/Loki。
+EOF
+}
+
+show_help_install() {
+  cat <<'EOF'
+install 适合:
+  1. 首次安装 MySQL
+  2. 修改规格后再次对齐
+  3. 需要启用或关闭 sidecar 型能力
+  4. 不删除 PVC 的前提下重装并复用数据
+
+实例参数:
+  -n, --namespace <ns>              默认: aict
+  --root-password <password>        默认: passw0rd
+  --auth-secret <name>              默认: mysql-auth
+  --mysql-replicas <num>            默认: 1
+  --storage-class <name>            默认: nfs
+  --storage-size <size>             默认: 10Gi
+  --service-name <name>             默认: mysql
+  --sts-name <name>                 默认: mysql
+  --nodeport-service-name <name>    默认: mysql-nodeport
+  --node-port <port>                默认: 30306
+  --mysql-slow-query-time <sec>     默认: 2
+  --wait-timeout <duration>         默认: 10m
+  --backup-root-dir <dir>           默认: backups
+  --backup-backend nfs|s3           默认: nfs
+  --backup-nfs-server <addr>        启用 NFS 备份时填写
+  --backup-nfs-path <path>          默认: /data/nfs-share
+
+存储目录说明:
+  1. MySQL 数据目录固定为容器内 /var/lib/mysql。
+  2. 你能配置的是 PVC 存储类与容量，也就是 --storage-class / --storage-size。
+  3. 备份目录由 --backup-root-dir 配置，再叠加 NFS 导出路径或 S3 前缀。
+
+功能开关:
+  默认值: monitoring / service-monitor / fluentbit / backup / benchmark 全部开启
+  --enable-monitoring / --disable-monitoring
+  --enable-service-monitor / --disable-service-monitor
+  --enable-fluentbit / --disable-fluentbit
+  --enable-backup / --disable-backup
+  --enable-benchmark / --disable-benchmark
+
+业务影响:
+  1. install 会重新对齐 StatefulSet 模板。
+  2. 如果 sidecar 或 MySQL 配置变化，可能触发滚动更新。
+  3. 如果只是补监控或备份，优先使用 addon-install。
+EOF
+}
+
+show_help_addons() {
+  cat <<'EOF'
+addon-install / addon-uninstall / addon-status 面向“已有 MySQL 补能力”。
+
+支持的 addon:
+  monitoring
+    外置 mysqld-exporter Deployment + Service
+    默认新增独立 Pod，不修改 MySQL StatefulSet
+
+  service-monitor
+    仅创建 ServiceMonitor 声明
+    自动依赖 monitoring
+
+  backup
+    安装备份支持资源 + CronJob
+    不会重启 MySQL Pod
+
+addon 参数:
+  --addons <list>                   必填，逗号分隔: monitoring,service-monitor,backup
+  --monitoring-target <host:port>   监控目标地址；已有外部 MySQL 时建议显式指定
+  --exporter-user <user>            默认: mysqld_exporter
+  --exporter-password <password>    默认: exporter@passw0rd
+
+补备份能力时建议同时给出:
+  --mysql-host <host>
+  --mysql-port <port>
+  --mysql-user <user>
+  --mysql-password <password>
+  或:
+  --mysql-auth-secret <name> --mysql-password-key <key>
+
+日志决策:
+  1. 已有平台级日志体系时，不建议给 MySQL 叠加 sidecar。
+  2. addon 路径不提供 logging addon，因为它会改 StatefulSet。
+  3. 必须采 slow log 文件时，再使用 install --enable-fluentbit。
+EOF
+}
+
+show_help_backup() {
+  cat <<'EOF'
+请区分两个场景:
+
+场景 A: 安装备份组件
+  install --enable-backup
+  addon-install --addons backup
+
+场景 B: 立即执行一次备份
+  backup
+
+区别:
+  1. 场景 A 安装 ConfigMap / Secret / CronJob。
+  2. 场景 B 只创建一次性 Job，不会顺手安装定时 CronJob。
+
+目标连接参数:
+  --mysql-host <host>               默认推导为 <sts>-0.<svc>.<ns>.svc.cluster.local
+  --mysql-port <port>               默认: 3306
+  --mysql-user <user>               默认: root
+  --mysql-password <password>       一次性动作推荐显式传入
+  --mysql-auth-secret <name>        从已有 Secret 取密码
+  --mysql-password-key <key>        Secret 中密码键名
+  --mysql-target-name <name>        备份目录中的逻辑实例名
+
+NFS 参数:
+  --backup-backend nfs
+  --backup-nfs-server <addr>
+  --backup-nfs-path <path>          默认: /data/nfs-share
+  --backup-root-dir <dir>           默认: backups
+  --backup-retention <num>          默认: 5
+  --backup-schedule <cron>          仅安装 CronJob 时使用
+
+NFS 路径:
+  <backup-nfs-path>/<backup-root-dir>/mysql/<namespace>/<mysql-target-name>/
+
+S3 路径:
+  <bucket>/<s3-prefix>/<backup-root-dir>/mysql/<namespace>/<mysql-target-name>/
+
+关于 secret not found:
+  1. 现在不会再因为命名空间写错而默认创建错误的 mysql-auth。
+  2. 对已有外部 MySQL，请显式传 --mysql-password 或 --mysql-auth-secret。
+EOF
+}
+
+show_help_restore() {
+  cat <<'EOF'
+restore 会立即创建一次恢复 Job。
+
+关键参数:
+  --restore-snapshot latest|<snapshot>
+  --restore-mode merge|wipe-all-user-databases
+  --mysql-host <host>
+  --mysql-port <port>
+  --mysql-user <user>
+  --mysql-password <password>
+  --mysql-auth-secret <name>
+  --mysql-password-key <key>
+  --mysql-target-name <name>
+
+restore-mode:
+  merge
+    直接导入快照 SQL。
+    同名库通常会被覆盖。
+    快照中不存在的其他用户库会保留。
+
+  wipe-all-user-databases
+    先删除所有非系统库，再导入快照。
+    更接近整库回滚，但风险更高。
+EOF
+}
+
+show_help_benchmark() {
+  cat <<'EOF'
+benchmark 采用 sysbench 风格的工程化压测流程。
+
+流程:
+  1. 识别目标 MySQL 版本
+  2. 创建 benchmark 数据库
+  3. 准备测试表和测试数据
+  4. 执行带 warmup 的正式压测
+  5. 输出吞吐、QPS、平均延迟、p50/p95/p99
+
+目标连接参数:
+  --mysql-host <host>
+  --mysql-port <port>               默认: 3306
+  --mysql-user <user>               默认: root
+  --mysql-password <password>       推荐压测时显式传入，避免依赖默认 Secret
+  --mysql-auth-secret <name>        默认: mysql-auth
+  --mysql-password-key <key>        默认: mysql-root-password
+
+压测参数:
+  --benchmark-profile standard|oltp-point-select|oltp-read-only|oltp-read-write
+  --benchmark-threads <n>           默认: 32
+  --benchmark-time <sec>            默认: 180
+  --benchmark-warmup-time <sec>     默认: 30
+  --benchmark-tables <n>            默认: 8
+  --benchmark-table-size <n>        默认: 100000
+  --benchmark-db <name>             默认: sbtest
+  --benchmark-rand-type <name>      默认: uniform
+  --benchmark-keep-data             保留测试表
+  --report-dir <path>               默认: ./reports
+
+查看过程:
+  1. 安装器会自动输出 Job 名称、目标地址、实时日志查看命令。
+  2. benchmark 若未显式传 --wait-timeout，会按 profile/time/table-size 自动放大等待时长。
+  3. 你也可以手工查看:
+     kubectl logs -n <ns> -f job/<job-name>
+     kubectl get pod -n <ns> -l job-name=<job-name> -w
+
+示例:
+  ./mysql-installer.run benchmark \
+    --namespace mysql-demo \
+    --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+    --mysql-port 3306 \
+    --mysql-user root \
+    --mysql-password 'StrongPassw0rd' \
+    --benchmark-profile standard \
+    --benchmark-threads 64 \
+    --benchmark-time 300 \
+    --benchmark-warmup-time 60 \
+    --benchmark-tables 16 \
+    --benchmark-table-size 200000 \
+    --report-dir ./reports \
+    -y
+
+版本说明:
+  1. 报告会输出 mysql_version 和 version_family。
+  2. 当前 workload 默认兼容 MySQL 5.7 / 8.x。
+EOF
+}
+
+show_help_params() {
+  cat <<'EOF'
+全量参数速查:
+
+通用参数:
+  -n, --namespace <ns>              默认: aict
+  -y, --yes                         默认: false
+  --wait-timeout <duration>         默认: 10m
+  --skip-image-prepare              默认: false
+  --delete-pvc                      默认: false
+
+MySQL 实例参数:
+  --root-password <password>        默认: passw0rd
+  --auth-secret <name>              默认: mysql-auth
+  --mysql-replicas <num>            默认: 1
+  --mysql-slow-query-time <sec>     默认: 2
+  --storage-class <name>            默认: nfs
+  --storage-size <size>             默认: 10Gi
+  --service-name <name>             默认: mysql
+  --sts-name <name>                 默认: mysql
+  --nodeport-service-name <name>    默认: mysql-nodeport
+  --node-port <port>                默认: 30306
+  数据目录                          固定: /var/lib/mysql
+
+现有 MySQL 目标参数:
+  --mysql-host <host>               默认: <sts>-0.<svc>.<ns>.svc.cluster.local
+  --mysql-port <port>               默认: 3306
+  --mysql-user <user>               默认: root
+  --mysql-password <password>
+  --mysql-auth-secret <name>        默认: mysql-auth
+  --mysql-password-key <key>        默认: mysql-root-password
+  --mysql-target-name <name>        默认: <sts-name> 或按 mysql-host 推导
+
+监控 addon 参数:
+  --addons <list>
+  --monitoring-target <host:port>
+  --exporter-user <user>            默认: mysqld_exporter
+  --exporter-password <password>    默认: exporter@passw0rd
+
+特性开关:
+  默认值: monitoring / service-monitor / fluentbit / backup / benchmark 全部开启
+  --enable-monitoring / --disable-monitoring
+  --enable-service-monitor / --disable-service-monitor
+  --enable-fluentbit / --disable-fluentbit
+  --enable-backup / --disable-backup
+  --enable-benchmark / --disable-benchmark
+
+备份参数:
+  --backup-backend nfs|s3           默认: nfs
+  --backup-nfs-server <addr>
+  --backup-nfs-path <path>          默认: /data/nfs-share
+  --backup-root-dir <dir>           默认: backups
+  --backup-schedule <cron>          默认: 0 2 * * *
+  --backup-retention <num>          默认: 5
+  --s3-endpoint <url>
+  --s3-bucket <bucket>
+  --s3-prefix <prefix>              默认: 空
+  --s3-access-key <ak>
+  --s3-secret-key <sk>
+  --s3-insecure                     默认: false
+
+恢复参数:
+  --restore-snapshot <snapshot>     默认: latest
+  --restore-mode merge|wipe-all-user-databases
+                                    默认: merge
+
+压测参数:
+  --benchmark-profile standard|oltp-point-select|oltp-read-only|oltp-read-write
+  --benchmark-threads <n>           默认: 32
+  --benchmark-time <sec>            默认: 180
+  --benchmark-warmup-time <sec>     默认: 30
+  --benchmark-tables <n>            默认: 8
+  --benchmark-table-size <n>        默认: 100000
+  --benchmark-db <name>             默认: sbtest
+  --benchmark-rand-type <name>      默认: uniform
+  --benchmark-keep-data             默认: false
+  --report-dir <path>               默认: ./reports
+
+兼容旧参数:
+  --benchmark-host / --benchmark-port / --benchmark-user
+  --benchmark-concurrency
+  --benchmark-warmup-rows
+EOF
+}
+
+show_help_backup_restore() {
+  cat <<'EOF'
+备份原理:
+  1. 连接目标 MySQL 并探测可用性
+  2. 枚举用户库，排除系统库
+  3. 执行 mysqldump，生成 gzip、sha256 和 meta
+  4. 更新 latest.txt，并按 retention 清理旧快照
+
+恢复原理:
+  1. 定位快照
+  2. 校验 sha256
+  3. 按 restore-mode 决定是否先清空用户库
+  4. gunzip 后通过 mysql 客户端导入
+
+业务影响:
+  1. backup 不要求停业务。
+  2. restore 不会主动停库，但会修改目标数据，建议维护窗口执行。
+EOF
+}
+
+show_help_logging() {
+  cat <<'EOF'
+日志能力建议分两层:
+
+平台层:
+  DaemonSet Fluent Bit + ES/OpenSearch/Loki
+  统一采集容器 stdout/stderr
+
+应用层:
+  MySQL sidecar Fluent Bit
+  直接采 slow log / error log 文件
+
+当前推荐:
+  1. 已建设平台日志体系时，不建议再做 MySQL sidecar。
+  2. addon 路径不提供 logging addon。
+  3. install --enable-fluentbit 仅保留给必须采容器内日志文件的场景。
+
+日志落点:
+  1. 默认模式下，研发优先看容器 stdout/stderr。
+  2. 启用 fluentbit sidecar 后，MySQL 会把 error log / slow log 写到 /var/log/mysql/*.log。
+  3. sidecar 负责 tail 这些文件并输出到自己的 stdout，便于被平台日志系统继续采走。
+
+研发快速排查:
+  1. 查看 MySQL 容器日志:
+     kubectl logs -n <ns> <pod> -c mysql --tail=200
+  2. 查看 sidecar 日志:
+     kubectl logs -n <ns> <pod> -c fluent-bit --tail=200
+  3. 直接进入 Pod 看日志文件:
+     kubectl exec -n <ns> <pod> -c mysql -- ls -l /var/log/mysql
+     kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/error.log
+     kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/slow.log
+EOF
+}
+
+show_help_architecture() {
+  cat <<'EOF'
+能力分层:
+  install
+    负责 MySQL 本体、StatefulSet、Service、PVC，以及 sidecar 型能力
+
+  addon-install
+    负责已有 MySQL 的外置能力补齐，例如 exporter Deployment、ServiceMonitor、backup CronJob
+
+为什么监控能做 addon，而日志默认不做:
+  1. exporter 可以外置成独立 Deployment。
+  2. slow log 文件采集通常需要 sidecar 进入同一个 Pod。
+EOF
+}
+
+show_help_examples() {
+  cat <<'EOF'
+常见示例:
+
+首次安装:
+  ./mysql-installer.run install \
+    --namespace mysql-demo \
+    --root-password 'StrongPassw0rd' \
+    --storage-class nfs \
+    --storage-size 20Gi \
+    --backup-backend nfs \
+    --backup-nfs-server 192.168.10.2 \
+    --backup-nfs-path /data/nfs-share \
+    --backup-root-dir backups \
+    -y
+
+已有 MySQL 安装定时备份组件:
+  ./mysql-installer.run addon-install \
+    --namespace mysql-demo \
+    --addons backup \
+    --mysql-host 10.0.0.20 \
+    --mysql-port 3306 \
+    --mysql-user root \
+    --mysql-password '<MYSQL_PASSWORD>' \
+    --mysql-target-name mysql-prod \
+    --backup-backend nfs \
+    --backup-nfs-server 192.168.10.2 \
+    --backup-nfs-path /data/nfs-share \
+    --backup-root-dir backups \
+    --backup-schedule '0 2 * * *' \
+    -y
+
+立即执行一次备份:
+  ./mysql-installer.run backup \
+    --namespace mysql-demo \
+    --mysql-host 10.0.0.20 \
+    --mysql-port 3306 \
+    --mysql-user root \
+    --mysql-password '<MYSQL_PASSWORD>' \
+    --mysql-target-name mysql-prod \
+    --backup-backend nfs \
+    --backup-nfs-server 192.168.10.2 \
+    --backup-nfs-path /data/nfs-share \
+    --backup-root-dir backups \
+    -y
+
+独立压测:
+  ./mysql-installer.run benchmark \
+    --namespace mysql-demo \
+    --mysql-host 10.0.0.20 \
+    --mysql-port 3306 \
+    --mysql-user root \
+    --mysql-password '<MYSQL_PASSWORD>' \
+    --benchmark-profile standard \
+    --benchmark-threads 64 \
+    --benchmark-time 300 \
+    --benchmark-warmup-time 60 \
+    --benchmark-tables 16 \
+    --benchmark-table-size 200000 \
+    --report-dir ./reports \
+    -y
+EOF
+}
+
+show_help() {
+  case "${HELP_TOPIC}" in
+    overview)
+      show_help_overview
+      ;;
+    install)
+      show_help_install
+      ;;
+    addons)
+      show_help_addons
+      ;;
+    backup)
+      show_help_backup
+      ;;
+    restore)
+      show_help_restore
+      ;;
+    benchmark)
+      show_help_benchmark
+      ;;
+    params)
+      show_help_params
+      ;;
+    backup-restore)
+      show_help_backup_restore
+      ;;
+    logging)
+      show_help_logging
+      ;;
+    architecture)
+      show_help_architecture
+      ;;
+    examples)
+      show_help_examples
+      ;;
+    *)
+      die "未知 help 主题: ${HELP_TOPIC}。可用主题: overview, install, addons, backup, restore, benchmark, params, backup-restore, logging, architecture, examples"
+      ;;
+  esac
+}
+
 parse_args() {
   if [[ $# -eq 0 ]]; then
     ACTION="help"
@@ -854,6 +1395,7 @@ parse_args() {
           ;;
       --wait-timeout)
         WAIT_TIMEOUT="$2"
+        WAIT_TIMEOUT_EXPLICIT="true"
         shift 2
         ;;
       --skip-image-prepare)
@@ -910,6 +1452,324 @@ parse_args() {
     esac
   done
   }
+
+parse_args() {
+  if [[ $# -eq 0 ]]; then
+    ACTION="help"
+    HELP_TOPIC="overview"
+    return 0
+  fi
+
+  case "$1" in
+    help)
+      ACTION="help"
+      shift
+      if [[ $# -gt 0 ]]; then
+        HELP_TOPIC="$1"
+        shift
+      fi
+      [[ $# -eq 0 ]] || die "help 仅支持一个主题参数"
+      return 0
+      ;;
+    -h|--help)
+      ACTION="help"
+      HELP_TOPIC="overview"
+      shift
+      [[ $# -eq 0 ]] || die "--help 不接受其他参数，请使用 help <主题>"
+      return 0
+      ;;
+  esac
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      install|uninstall|status|addon-install|addon-uninstall|addon-status|backup|restore|verify-backup-restore|benchmark)
+        ACTION="$1"
+        shift
+        ;;
+      -n|--namespace)
+        NAMESPACE="$2"
+        shift 2
+        ;;
+      --mysql-replicas)
+        MYSQL_REPLICAS="$2"
+        shift 2
+        ;;
+      --storage-class)
+        STORAGE_CLASS="$2"
+        shift 2
+        ;;
+      --storage-size)
+        STORAGE_SIZE="$2"
+        shift 2
+        ;;
+      --root-password)
+        MYSQL_ROOT_PASSWORD="$2"
+        MYSQL_ROOT_PASSWORD_EXPLICIT="true"
+        shift 2
+        ;;
+      --auth-secret)
+        AUTH_SECRET="$2"
+        shift 2
+        ;;
+      --service-name)
+        SERVICE_NAME="$2"
+        shift 2
+        ;;
+      --addons)
+        ADDONS="$2"
+        shift 2
+        ;;
+      --sts-name)
+        STS_NAME="$2"
+        shift 2
+        ;;
+      --nodeport-service-name)
+        NODEPORT_SERVICE_NAME="$2"
+        shift 2
+        ;;
+      --node-port)
+        NODE_PORT="$2"
+        shift 2
+        ;;
+      --mysql-host)
+        MYSQL_HOST="$2"
+        MYSQL_HOST_EXPLICIT="true"
+        shift 2
+        ;;
+      --mysql-port)
+        MYSQL_PORT="$2"
+        shift 2
+        ;;
+      --mysql-user)
+        MYSQL_USER="$2"
+        shift 2
+        ;;
+      --mysql-password)
+        MYSQL_PASSWORD="$2"
+        MYSQL_PASSWORD_EXPLICIT="true"
+        shift 2
+        ;;
+      --mysql-auth-secret)
+        MYSQL_AUTH_SECRET="$2"
+        MYSQL_AUTH_SECRET_EXPLICIT="true"
+        shift 2
+        ;;
+      --mysql-password-key)
+        MYSQL_PASSWORD_KEY="$2"
+        MYSQL_PASSWORD_KEY_EXPLICIT="true"
+        shift 2
+        ;;
+      --mysql-target-name)
+        MYSQL_TARGET_NAME="$2"
+        MYSQL_TARGET_NAME_EXPLICIT="true"
+        shift 2
+        ;;
+      --enable-monitoring)
+        MONITORING_ENABLED="true"
+        shift
+        ;;
+      --disable-monitoring)
+        MONITORING_ENABLED="false"
+        shift
+        ;;
+      --enable-service-monitor)
+        SERVICE_MONITOR_ENABLED="true"
+        shift
+        ;;
+      --disable-service-monitor)
+        SERVICE_MONITOR_ENABLED="false"
+        shift
+        ;;
+      --enable-fluentbit)
+        FLUENTBIT_ENABLED="true"
+        shift
+        ;;
+      --disable-fluentbit)
+        FLUENTBIT_ENABLED="false"
+        shift
+        ;;
+      --enable-backup)
+        BACKUP_ENABLED="true"
+        shift
+        ;;
+      --disable-backup)
+        BACKUP_ENABLED="false"
+        shift
+        ;;
+      --enable-benchmark)
+        BENCHMARK_ENABLED="true"
+        shift
+        ;;
+      --disable-benchmark)
+        BENCHMARK_ENABLED="false"
+        shift
+        ;;
+      --mysql-slow-query-time)
+        MYSQL_SLOW_QUERY_TIME="$2"
+        shift 2
+        ;;
+      --backup-backend)
+        BACKUP_BACKEND="$2"
+        shift 2
+        ;;
+      --backup-nfs-server)
+        BACKUP_NFS_SERVER="$2"
+        shift 2
+        ;;
+      --backup-nfs-path)
+        BACKUP_NFS_PATH="$2"
+        shift 2
+        ;;
+      --backup-root-dir)
+        BACKUP_ROOT_DIR="$2"
+        shift 2
+        ;;
+      --backup-schedule)
+        BACKUP_SCHEDULE="$2"
+        shift 2
+        ;;
+      --backup-retention)
+        BACKUP_RETENTION="$2"
+        shift 2
+        ;;
+      --s3-endpoint)
+        S3_ENDPOINT="$2"
+        shift 2
+        ;;
+      --s3-bucket)
+        S3_BUCKET="$2"
+        shift 2
+        ;;
+      --s3-prefix)
+        S3_PREFIX="$2"
+        shift 2
+        ;;
+      --s3-access-key)
+        S3_ACCESS_KEY="$2"
+        shift 2
+        ;;
+      --s3-secret-key)
+        S3_SECRET_KEY="$2"
+        shift 2
+        ;;
+      --s3-insecure)
+        S3_INSECURE="true"
+        shift
+        ;;
+      --exporter-user)
+        ADDON_EXPORTER_USERNAME="$2"
+        shift 2
+        ;;
+      --exporter-password)
+        ADDON_EXPORTER_PASSWORD="$2"
+        shift 2
+        ;;
+      --monitoring-target)
+        ADDON_MONITORING_TARGET="$2"
+        ADDON_MONITORING_TARGET_EXPLICIT="true"
+        shift 2
+        ;;
+      --restore-snapshot)
+        RESTORE_SNAPSHOT="$2"
+        shift 2
+        ;;
+      --restore-mode)
+        MYSQL_RESTORE_MODE="$2"
+        shift 2
+        ;;
+      --wait-timeout)
+        WAIT_TIMEOUT="$2"
+        WAIT_TIMEOUT_EXPLICIT="true"
+        shift 2
+        ;;
+      --skip-image-prepare)
+        SKIP_IMAGE_PREPARE="true"
+        shift
+        ;;
+      --delete-pvc)
+        DELETE_PVC="true"
+        shift
+        ;;
+      --report-dir)
+        REPORT_DIR="$2"
+        shift 2
+        ;;
+      --benchmark-concurrency|--benchmark-threads)
+        BENCHMARK_CONCURRENCY="$2"
+        BENCHMARK_THREADS="$2"
+        shift 2
+        ;;
+      --benchmark-iterations)
+        BENCHMARK_ITERATIONS="$2"
+        shift 2
+        ;;
+      --benchmark-queries)
+        BENCHMARK_QUERIES="$2"
+        shift 2
+        ;;
+      --benchmark-warmup-rows)
+        BENCHMARK_WARMUP_ROWS="$2"
+        BENCHMARK_TABLE_SIZE="$2"
+        shift 2
+        ;;
+      --benchmark-warmup-time)
+        BENCHMARK_WARMUP_TIME="$2"
+        shift 2
+        ;;
+      --benchmark-time)
+        BENCHMARK_TIME="$2"
+        shift 2
+        ;;
+      --benchmark-tables)
+        BENCHMARK_TABLES="$2"
+        shift 2
+        ;;
+      --benchmark-table-size)
+        BENCHMARK_TABLE_SIZE="$2"
+        shift 2
+        ;;
+      --benchmark-db)
+        BENCHMARK_DB="$2"
+        shift 2
+        ;;
+      --benchmark-rand-type)
+        BENCHMARK_RAND_TYPE="$2"
+        shift 2
+        ;;
+      --benchmark-keep-data)
+        BENCHMARK_KEEP_DATA="true"
+        shift
+        ;;
+      --benchmark-profile)
+        BENCHMARK_PROFILE="$2"
+        shift 2
+        ;;
+      --benchmark-host)
+        BENCHMARK_HOST="$2"
+        MYSQL_HOST="$2"
+        MYSQL_HOST_EXPLICIT="true"
+        shift 2
+        ;;
+      --benchmark-port)
+        BENCHMARK_PORT="$2"
+        MYSQL_PORT="$2"
+        shift 2
+        ;;
+      --benchmark-user)
+        BENCHMARK_USER="$2"
+        MYSQL_USER="$2"
+        shift 2
+        ;;
+      -y|--yes)
+        AUTO_YES="true"
+        shift
+        ;;
+      *)
+        die "未知参数: $1"
+        ;;
+    esac
+  done
+}
 
 normalize_addons() {
   local raw="${ADDONS:-}"
@@ -1079,6 +1939,10 @@ validate_environment() {
 }
 
 validate_inputs() {
+  if [[ "${ACTION}" != "install" && "${ACTION}" != "status" && "${ACTION}" != "help" ]] && ! namespace_exists; then
+    die "命名空间 ${NAMESPACE} 不存在。非 install 动作不会自动创建命名空间，请先确认 namespace。"
+  fi
+
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
     [[ "${NODE_PORT}" =~ ^[0-9]+$ ]] || die "nodePort 必须是数字"
@@ -1178,6 +2042,369 @@ print_plan() {
     echo "压测请求量              : ${BENCHMARK_QUERIES}"
     echo "预热数据量              : ${BENCHMARK_WARMUP_ROWS}"
     echo "压测模式                : ${BENCHMARK_PROFILE}"
+  fi
+}
+
+needs_backup_storage() {
+  if [[ "${ACTION}" == "addon-install" ]]; then
+    addon_selected backup && return 0
+    return 1
+  fi
+
+  case "${ACTION}" in
+    install)
+      [[ "${BACKUP_ENABLED}" == "true" ]]
+      ;;
+    backup|restore|verify-backup-restore)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+backup_schedule_required() {
+  [[ "${ACTION}" == "install" && "${BACKUP_ENABLED}" == "true" ]] && return 0
+  [[ "${ACTION}" == "addon-install" ]] && addon_selected backup && return 0
+  return 1
+}
+
+action_needs_image_prepare() {
+  case "${ACTION}" in
+    install|addon-install|backup|restore|verify-backup-restore|benchmark)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+action_needs_mysql_auth() {
+  case "${ACTION}" in
+    backup|restore|verify-backup-restore|benchmark)
+      return 0
+      ;;
+    addon-install)
+      addon_selected backup && return 0
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+sanitize_target_name() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9.-]/-/g; s/\.\+/-/g; s/--\+/-/g; s/^-//; s/-$//'
+}
+
+resolve_mysql_target_defaults() {
+  local default_host="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local"
+
+  if [[ -z "${MYSQL_HOST}" ]]; then
+    MYSQL_HOST="${default_host}"
+  fi
+
+  if [[ -z "${MYSQL_AUTH_SECRET}" ]]; then
+    if [[ "${MYSQL_PASSWORD_EXPLICIT}" == "true" ]]; then
+      MYSQL_AUTH_SECRET="${MYSQL_RUNTIME_SECRET}"
+    else
+      MYSQL_AUTH_SECRET="${AUTH_SECRET}"
+    fi
+  fi
+
+  if [[ -z "${MYSQL_PASSWORD_KEY}" ]]; then
+    if [[ "${MYSQL_AUTH_SECRET}" == "${AUTH_SECRET}" ]]; then
+      MYSQL_PASSWORD_KEY="mysql-root-password"
+    else
+      MYSQL_PASSWORD_KEY="password"
+    fi
+  fi
+
+  if [[ -z "${MYSQL_TARGET_NAME}" ]]; then
+    if [[ "${MYSQL_HOST_EXPLICIT}" == "true" ]]; then
+      MYSQL_TARGET_NAME="$(sanitize_target_name "${MYSQL_HOST}")"
+    else
+      MYSQL_TARGET_NAME="${STS_NAME}"
+    fi
+  fi
+
+  if [[ -z "${ADDON_MONITORING_TARGET}" ]]; then
+    ADDON_MONITORING_TARGET="${MYSQL_HOST}:${MYSQL_PORT}"
+  fi
+
+  if [[ -z "${BENCHMARK_HOST}" ]]; then
+    BENCHMARK_HOST="${MYSQL_HOST}"
+  fi
+  if [[ -z "${BENCHMARK_PORT}" ]]; then
+    BENCHMARK_PORT="${MYSQL_PORT}"
+  fi
+  if [[ -z "${BENCHMARK_USER}" ]]; then
+    BENCHMARK_USER="${MYSQL_USER}"
+  fi
+
+  if [[ "${BENCHMARK_TIME}" == "180" && "${BENCHMARK_ITERATIONS}" != "3" ]]; then
+    BENCHMARK_TIME="$((BENCHMARK_ITERATIONS * 60))"
+  fi
+  if [[ "${BENCHMARK_TABLE_SIZE}" == "100000" && "${BENCHMARK_WARMUP_ROWS}" != "10000" ]]; then
+    BENCHMARK_TABLE_SIZE="${BENCHMARK_WARMUP_ROWS}"
+  fi
+}
+
+cluster_supports_service_monitor() {
+  kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1
+}
+
+resolve_feature_dependencies() {
+  resolve_mysql_target_defaults
+
+  if [[ "${MONITORING_ENABLED}" != "true" && "${SERVICE_MONITOR_ENABLED}" == "true" ]]; then
+    warn "monitoring 已关闭，因此自动关闭 ServiceMonitor"
+    SERVICE_MONITOR_ENABLED="false"
+  fi
+
+  if [[ "${ACTION}" == "addon-install" || "${ACTION}" == "addon-uninstall" ]]; then
+    normalize_addons
+    SERVICE_MONITOR_ENABLED="false"
+
+    if addon_selected service-monitor && ! addon_selected monitoring && [[ "${ACTION}" == "addon-install" ]]; then
+      warn "service-monitor 依赖 monitoring，已自动补齐 monitoring"
+      ADDONS="monitoring,${ADDONS}"
+      normalize_addons
+    fi
+
+    if addon_selected monitoring && ! addon_selected service-monitor && [[ "${ACTION}" == "addon-uninstall" ]]; then
+      ADDONS="${ADDONS},service-monitor"
+      normalize_addons
+    fi
+
+    if addon_selected service-monitor; then
+      SERVICE_MONITOR_ENABLED="true"
+    fi
+  fi
+}
+
+validate_action_feature_gates() {
+  case "${ACTION}" in
+    addon-install|addon-uninstall)
+      [[ -n "${ADDONS}" ]] || die "动作 ${ACTION} 需要提供 --addons"
+      ;;
+  esac
+}
+
+secret_has_key() {
+  local secret_name="$1"
+  local key_name="$2"
+  kubectl get secret -n "${NAMESPACE}" "${secret_name}" -o "jsonpath={.data.${key_name}}" >/dev/null 2>&1
+}
+
+prepare_runtime_auth_secret() {
+  action_needs_mysql_auth || return 0
+
+  if [[ -n "${MYSQL_PASSWORD}" ]]; then
+    kubectl create secret generic "${MYSQL_AUTH_SECRET}" \
+      -n "${NAMESPACE}" \
+      --from-literal="${MYSQL_PASSWORD_KEY}=${MYSQL_PASSWORD}" \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    return 0
+  fi
+
+  if secret_has_key "${MYSQL_AUTH_SECRET}" "${MYSQL_PASSWORD_KEY}"; then
+    return 0
+  fi
+
+  if [[ "${MYSQL_ROOT_PASSWORD_EXPLICIT}" == "true" && "${MYSQL_AUTH_SECRET}" == "${AUTH_SECRET}" && "${MYSQL_PASSWORD_KEY}" == "mysql-root-password" ]]; then
+    warn "未找到 Secret/${MYSQL_AUTH_SECRET}，将使用显式传入的 --root-password 创建"
+    kubectl create secret generic "${MYSQL_AUTH_SECRET}" \
+      -n "${NAMESPACE}" \
+      --from-literal="${MYSQL_PASSWORD_KEY}=${MYSQL_ROOT_PASSWORD}" \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    return 0
+  fi
+
+  die "命名空间 ${NAMESPACE} 中未找到 Secret/${MYSQL_AUTH_SECRET} 的键 ${MYSQL_PASSWORD_KEY}。请显式传 --mysql-password，或指定正确的 --mysql-auth-secret/--mysql-password-key。"
+}
+
+prompt_missing_values() {
+  if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
+    echo -ne "${YELLOW}请输入 NFS 服务器地址:${NC} "
+    read -r BACKUP_NFS_SERVER
+  fi
+
+  if needs_backup_storage && backup_backend_is_s3; then
+    if [[ -z "${S3_ENDPOINT}" ]]; then
+      echo -ne "${YELLOW}请输入 S3 Endpoint（如 https://minio.example.com）:${NC} "
+      read -r S3_ENDPOINT
+    fi
+    if [[ -z "${S3_BUCKET}" ]]; then
+      echo -ne "${YELLOW}请输入 S3 Bucket:${NC} "
+      read -r S3_BUCKET
+    fi
+    if [[ -z "${S3_ACCESS_KEY}" ]]; then
+      echo -ne "${YELLOW}请输入 S3 Access Key:${NC} "
+      read -r S3_ACCESS_KEY
+    fi
+    if [[ -z "${S3_SECRET_KEY}" ]]; then
+      echo -ne "${YELLOW}请输入 S3 Secret Key:${NC} "
+      read -rs S3_SECRET_KEY
+      echo
+    fi
+  fi
+
+  [[ -n "${BACKUP_NFS_PATH}" ]] || BACKUP_NFS_PATH="/data/nfs-share"
+}
+
+validate_environment() {
+  command -v kubectl >/dev/null 2>&1 || die "未找到 kubectl"
+
+  if action_needs_image_prepare && [[ "${SKIP_IMAGE_PREPARE}" != "true" ]]; then
+    command -v docker >/dev/null 2>&1 || die "未找到 docker"
+    command -v jq >/dev/null 2>&1 || die "未找到 jq"
+  fi
+}
+
+validate_inputs() {
+  if [[ "${ACTION}" != "addon-status" ]]; then
+    [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
+    [[ "${NODE_PORT}" =~ ^[0-9]+$ ]] || die "nodePort 必须是数字"
+    (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须在 30000-32767 之间"
+  fi
+
+  [[ "${MYSQL_PORT}" =~ ^[0-9]+$ ]] || die "MySQL 端口必须是数字"
+  [[ "${BACKUP_RETENTION}" =~ ^[0-9]+$ ]] || die "备份保留数量必须是数字"
+  [[ "${BENCHMARK_THREADS}" =~ ^[0-9]+$ ]] || die "压测线程数必须是数字"
+  [[ "${BENCHMARK_TIME}" =~ ^[0-9]+$ ]] || die "压测时长必须是数字"
+  [[ "${BENCHMARK_WARMUP_TIME}" =~ ^[0-9]+$ ]] || die "压测 warmup 时长必须是数字"
+  [[ "${BENCHMARK_TABLES}" =~ ^[0-9]+$ ]] || die "压测表数必须是数字"
+  [[ "${BENCHMARK_TABLE_SIZE}" =~ ^[0-9]+$ ]] || die "压测单表数据量必须是数字"
+  [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
+  [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
+  [[ "${MYSQL_RESTORE_MODE}" =~ ^(merge|wipe-all-user-databases)$ ]] || die "restore-mode 仅支持 merge 或 wipe-all-user-databases"
+  [[ "${BENCHMARK_PROFILE}" =~ ^(standard|oltp-point-select|oltp-read-only|oltp-read-write)$ ]] || die "benchmark-profile 仅支持 standard、oltp-point-select、oltp-read-only、oltp-read-write"
+
+  if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
+    die "使用 NFS 备份时必须提供 --backup-nfs-server"
+  fi
+
+  if needs_backup_storage && backup_backend_is_s3; then
+    [[ -n "${S3_ENDPOINT}" ]] || die "使用 S3 备份时必须提供 --s3-endpoint"
+    [[ -n "${S3_BUCKET}" ]] || die "使用 S3 备份时必须提供 --s3-bucket"
+    [[ -n "${S3_ACCESS_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-access-key"
+    [[ -n "${S3_SECRET_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-secret-key"
+  fi
+
+  validate_action_feature_gates
+}
+
+mysql_auth_source_summary() {
+  if [[ -n "${MYSQL_PASSWORD}" ]]; then
+    echo "显式密码参数"
+  else
+    echo "Secret/${MYSQL_AUTH_SECRET}:${MYSQL_PASSWORD_KEY}"
+  fi
+}
+
+print_plan() {
+  section "执行计划"
+  echo "动作                    : ${ACTION}"
+  echo "命名空间                : ${NAMESPACE}"
+  echo "等待超时                : ${WAIT_TIMEOUT}"
+
+  case "${ACTION}" in
+    install)
+      echo "StatefulSet             : ${STS_NAME}"
+      echo "服务名                  : ${SERVICE_NAME}"
+      echo "NodePort 服务名         : ${NODEPORT_SERVICE_NAME}"
+      echo "NodePort                : ${NODE_PORT}"
+      echo "副本数                  : ${MYSQL_REPLICAS}"
+      echo "StorageClass            : ${STORAGE_CLASS}"
+      echo "存储大小                : ${STORAGE_SIZE}"
+      echo "数据目录                : /var/lib/mysql（固定）"
+      echo "监控 exporter           : ${MONITORING_ENABLED}"
+      echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
+      echo "Fluent Bit              : ${FLUENTBIT_ENABLED}"
+      echo "备份组件                : ${BACKUP_ENABLED}"
+      echo "压测能力                : ${BENCHMARK_ENABLED}"
+      echo "特性开关默认            : monitoring/service-monitor/fluentbit/backup/benchmark 默认开启"
+      echo "业务影响                : install 会整套对齐 StatefulSet；配置变化时可能触发滚动更新"
+      ;;
+    addon-install|addon-uninstall)
+      echo "Addon 列表              : ${ADDONS}"
+      echo "业务影响                : 默认只新增或删除外置资源，不修改 MySQL StatefulSet"
+      if addon_selected monitoring; then
+        echo "监控目标                : ${ADDON_MONITORING_TARGET}"
+        echo "监控账号                : ${ADDON_EXPORTER_USERNAME}"
+      fi
+      if addon_selected backup; then
+        echo "备份目标                : ${MYSQL_HOST}:${MYSQL_PORT}"
+        echo "备份账号                : ${MYSQL_USER}"
+        echo "认证来源                : $(mysql_auth_source_summary)"
+        echo "逻辑实例名              : ${MYSQL_TARGET_NAME}"
+      fi
+      ;;
+    backup)
+      echo "执行模式                : 立即执行一次备份 Job"
+      echo "备份目标                : ${MYSQL_HOST}:${MYSQL_PORT}"
+      echo "备份账号                : ${MYSQL_USER}"
+      echo "认证来源                : $(mysql_auth_source_summary)"
+      echo "逻辑实例名              : ${MYSQL_TARGET_NAME}"
+      echo "备份后端                : ${BACKUP_BACKEND}"
+      echo "保留数量                : ${BACKUP_RETENTION}"
+      echo "业务影响                : 只创建一次性备份 Job，不会安装 CronJob"
+      ;;
+    restore)
+      echo "执行模式                : 立即执行一次恢复 Job"
+      echo "恢复目标                : ${MYSQL_HOST}:${MYSQL_PORT}"
+      echo "恢复账号                : ${MYSQL_USER}"
+      echo "认证来源                : $(mysql_auth_source_summary)"
+      echo "逻辑实例名              : ${MYSQL_TARGET_NAME}"
+      echo "恢复快照                : ${RESTORE_SNAPSHOT}"
+      echo "恢复模式                : ${MYSQL_RESTORE_MODE}"
+      echo "业务影响                : 会对目标实例执行导入，建议维护窗口执行"
+      ;;
+    verify-backup-restore)
+      echo "执行模式                : 备份/恢复闭环校验"
+      echo "校验目标                : ${MYSQL_HOST}:${MYSQL_PORT}"
+      echo "校验账号                : ${MYSQL_USER}"
+      echo "认证来源                : $(mysql_auth_source_summary)"
+      echo "逻辑实例名              : ${MYSQL_TARGET_NAME}"
+      echo "业务影响                : 会写入 offline_validation 库表用于校验"
+      ;;
+    benchmark)
+      echo "执行模式                : 工程化压测 Job"
+      echo "压测目标                : ${MYSQL_HOST}:${MYSQL_PORT}"
+      echo "压测账号                : ${MYSQL_USER}"
+      echo "认证来源                : $(mysql_auth_source_summary)"
+      echo "压测模型                : ${BENCHMARK_PROFILE}"
+      echo "压测线程数              : ${BENCHMARK_THREADS}"
+      echo "正式压测时长(秒)        : ${BENCHMARK_TIME}"
+      echo "Warmup 时长(秒)         : ${BENCHMARK_WARMUP_TIME}"
+      echo "压测表数                : ${BENCHMARK_TABLES}"
+      echo "单表数据量              : ${BENCHMARK_TABLE_SIZE}"
+      echo "压测数据库              : ${BENCHMARK_DB}"
+      echo "随机分布                : ${BENCHMARK_RAND_TYPE}"
+      echo "保留测试数据            : ${BENCHMARK_KEEP_DATA}"
+      echo "报告目录                : ${REPORT_DIR}"
+      echo "自动等待超时            : $(job_wait_timeout benchmark)"
+      ;;
+  esac
+
+  if needs_backup_storage; then
+    echo "备份根目录              : ${BACKUP_ROOT_DIR}"
+    if backup_schedule_required; then
+      echo "备份计划                : ${BACKUP_SCHEDULE}"
+    fi
+    if backup_backend_is_nfs; then
+      echo "NFS 服务地址            : ${BACKUP_NFS_SERVER}"
+      echo "NFS 导出路径            : ${BACKUP_NFS_PATH}"
+    else
+      echo "S3 Endpoint             : ${S3_ENDPOINT}"
+      echo "S3 Bucket               : ${S3_BUCKET}"
+      echo "S3 Prefix               : ${S3_PREFIX:-<空>}"
+      echo "S3 Insecure             : ${S3_INSECURE}"
+    fi
   fi
 }
 
@@ -1446,16 +2673,165 @@ mysql_exec() {
 
 wait_for_job() {
   local job_name="$1"
+  local job_mode="${2:-generic}"
+  local timeout_value progress_pid=""
+
+  timeout_value="$(job_wait_timeout "${job_mode}")"
 
   log "等待 Job/${job_name} 完成"
-  if kubectl wait --for=condition=complete "job/${job_name}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}" >/dev/null 2>&1; then
+  if [[ "${job_mode}" == "benchmark" ]]; then
+    echo "压测目标                : ${MYSQL_HOST}:${MYSQL_PORT}"
+    echo "压测账号                : ${MYSQL_USER}"
+    echo "压测 Profile            : ${BENCHMARK_PROFILE}"
+    echo "压测并发                : ${BENCHMARK_THREADS}"
+    echo "压测时长(秒)            : ${BENCHMARK_TIME}"
+    echo "Warmup(秒)              : ${BENCHMARK_WARMUP_TIME}"
+    echo "压测表数                : ${BENCHMARK_TABLES}"
+    echo "每表数据量              : ${BENCHMARK_TABLE_SIZE}"
+    echo "实时日志命令            : kubectl logs -n ${NAMESPACE} -f job/${job_name}"
+    echo "状态观察命令            : kubectl get pod -n ${NAMESPACE} -l job-name=${job_name} -w"
+    echo "等待超时                : ${timeout_value}"
+    follow_benchmark_job "${job_name}" &
+    progress_pid=$!
+  fi
+
+  if kubectl wait --for=condition=complete "job/${job_name}" -n "${NAMESPACE}" --timeout="${timeout_value}" >/dev/null 2>&1; then
+    stop_background_task "${progress_pid}"
     success "Job/${job_name} 已完成"
     return 0
+  fi
+
+  stop_background_task "${progress_pid}"
+  if job_failed "${job_name}"; then
+    warn "Job/${job_name} 执行失败，输出日志如下"
+    kubectl logs -n "${NAMESPACE}" "job/${job_name}" --tail=-1 || true
+    local pod_name
+    pod_name="$(job_pod_name "${job_name}")"
+    if [[ -n "${pod_name}" ]]; then
+      echo
+      kubectl describe pod -n "${NAMESPACE}" "${pod_name}" || true
+    fi
+    return 1
+  fi
+
+  if [[ "${job_mode}" == "benchmark" ]]; then
+    warn "压测在等待上限 ${timeout_value} 内未结束，但 Job 仍可能在运行"
+    echo "继续查看日志            : kubectl logs -n ${NAMESPACE} -f job/${job_name}"
+    echo "继续查看状态            : kubectl get pod -n ${NAMESPACE} -l job-name=${job_name} -w"
+    kubectl get job -n "${NAMESPACE}" "${job_name}" || true
+    local pod_name
+    pod_name="$(job_pod_name "${job_name}")"
+    if [[ -n "${pod_name}" ]]; then
+      kubectl get pod -n "${NAMESPACE}" "${pod_name}" -o wide || true
+    fi
+    return 1
   fi
 
   warn "Job/${job_name} 未正常完成，输出日志如下"
   kubectl logs -n "${NAMESPACE}" "job/${job_name}" --tail=-1 || true
   return 1
+}
+
+job_wait_timeout() {
+  local job_mode="${1:-generic}"
+  local profile_count prepare_buffer cleanup_buffer safety_buffer total_seconds data_points
+
+  if [[ "${job_mode}" != "benchmark" || "${WAIT_TIMEOUT_EXPLICIT}" == "true" ]]; then
+    printf '%s' "${WAIT_TIMEOUT}"
+    return 0
+  fi
+
+  case "${BENCHMARK_PROFILE}" in
+    standard)
+      profile_count=3
+      ;;
+    *)
+      profile_count=1
+      ;;
+  esac
+
+  data_points=$((BENCHMARK_TABLES * BENCHMARK_TABLE_SIZE))
+  prepare_buffer=$((data_points / 1500))
+  if (( prepare_buffer < 240 )); then
+    prepare_buffer=240
+  fi
+  cleanup_buffer=120
+  safety_buffer=180
+  total_seconds=$((profile_count * (BENCHMARK_TIME + BENCHMARK_WARMUP_TIME) + prepare_buffer + cleanup_buffer + safety_buffer))
+  if (( total_seconds < 1800 )); then
+    total_seconds=1800
+  fi
+
+  printf '%ss' "${total_seconds}"
+}
+
+job_failed() {
+  local job_name="$1"
+  kubectl get job -n "${NAMESPACE}" "${job_name}" -o "jsonpath={range .status.conditions[*]}{.type}={.status}{'\n'}{end}" 2>/dev/null \
+    | grep -q '^Failed=True$'
+}
+
+job_completed() {
+  local job_name="$1"
+  kubectl get job -n "${NAMESPACE}" "${job_name}" -o "jsonpath={range .status.conditions[*]}{.type}={.status}{'\n'}{end}" 2>/dev/null \
+    | grep -q '^Complete=True$'
+}
+
+job_pod_name() {
+  local job_name="$1"
+  kubectl get pod -n "${NAMESPACE}" -l "job-name=${job_name}" -o "jsonpath={.items[0].metadata.name}" 2>/dev/null || true
+}
+
+job_pod_summary() {
+  local pod_name="$1"
+  kubectl get pod -n "${NAMESPACE}" "${pod_name}" \
+    -o "jsonpath={.status.phase}{' | init='}{range .status.initContainerStatuses[*]}{.name}:{.ready}:{.state.waiting.reason}{.state.terminated.reason}{' '}{end}{'| main='}{range .status.containerStatuses[*]}{.name}:{.ready}:{.state.waiting.reason}{.state.terminated.reason}{' '}{end}" 2>/dev/null || true
+}
+
+stop_background_task() {
+  local task_pid="${1:-}"
+  if [[ -n "${task_pid}" ]] && kill -0 "${task_pid}" >/dev/null 2>&1; then
+    kill "${task_pid}" >/dev/null 2>&1 || true
+    wait "${task_pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+follow_benchmark_job() {
+  local job_name="$1"
+  local pod_name="" last_summary="" init_logs_printed="false" main_logs_followed="false"
+
+  while true; do
+    if job_completed "${job_name}" || job_failed "${job_name}"; then
+      return 0
+    fi
+
+    pod_name="$(job_pod_name "${job_name}")"
+    if [[ -n "${pod_name}" ]]; then
+      local summary
+      summary="$(job_pod_summary "${pod_name}")"
+      if [[ -n "${summary}" && "${summary}" != "${last_summary}" ]]; then
+        log "压测 Pod 状态: ${pod_name} ${summary}"
+        last_summary="${summary}"
+      fi
+
+      if [[ "${init_logs_printed}" != "true" ]]; then
+        local init_logs
+        init_logs="$(kubectl logs -n "${NAMESPACE}" "pod/${pod_name}" -c mysql-prepare --tail=-1 2>/dev/null || true)"
+        if [[ -n "${init_logs}" ]]; then
+          echo "${init_logs}"
+          init_logs_printed="true"
+        fi
+      fi
+
+      if [[ "${main_logs_followed}" != "true" ]] && kubectl logs -n "${NAMESPACE}" "pod/${pod_name}" -c mysql-benchmark --tail=1 >/dev/null 2>&1; then
+        log "开始实时输出压测日志"
+        kubectl logs -n "${NAMESPACE}" -f "pod/${pod_name}" -c mysql-benchmark || true
+        main_logs_followed="true"
+      fi
+    fi
+
+    sleep 5
+  done
 }
 
 create_manual_backup_job() {
@@ -1574,6 +2950,244 @@ cleanup_disabled_optional_resources() {
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
     kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${FLUENTBIT_CONFIGMAP}" >/dev/null 2>&1 || true
   fi
+}
+
+extract_payload() {
+  section "解压安装载荷"
+  rm -rf "${WORKDIR}"
+  mkdir -p "${WORKDIR}" "${IMAGE_DIR}" "${MANIFEST_DIR}"
+
+  local payload_line
+  payload_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR + 1; exit }' "$0")"
+  [[ -n "${payload_line}" ]] || die "未找到载荷标记"
+
+  log "正在解压到 ${WORKDIR}"
+  tail -n +"${payload_line}" "$0" | tar -xz -C "${WORKDIR}" >/dev/null 2>&1 || die "解压载荷失败"
+
+  [[ -f "${MYSQL_MANIFEST}" ]] || die "缺少 MySQL manifest"
+  [[ -f "${BACKUP_MANIFEST}" ]] || die "缺少 backup cronjob manifest"
+  [[ -f "${BACKUP_SUPPORT_MANIFEST}" ]] || die "缺少 backup support manifest"
+  [[ -f "${BACKUP_JOB_MANIFEST}" ]] || die "缺少 backup job manifest"
+  [[ -f "${RESTORE_MANIFEST}" ]] || die "缺少 restore manifest"
+  [[ -f "${BENCHMARK_MANIFEST}" ]] || die "缺少 benchmark manifest"
+  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || die "缺少 monitoring addon manifest"
+  [[ -f "${IMAGE_JSON}" ]] || die "缺少 image.json"
+  success "载荷解压完成"
+}
+
+image_needed_for_current_action() {
+  local image_tag="$1"
+
+  case "${ACTION}" in
+    install)
+      return 0
+      ;;
+    addon-install)
+      if addon_selected monitoring && [[ "${image_tag}" == */mysqld-exporter:* ]]; then
+        return 0
+      fi
+      if addon_selected backup && [[ "${image_tag}" == */mysql:* ]]; then
+        return 0
+      fi
+      if addon_selected backup && backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+    backup|restore|verify-backup-restore)
+      if [[ "${image_tag}" == */mysql:* ]]; then
+        return 0
+      fi
+      if backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+    benchmark)
+      if [[ "${image_tag}" == */mysql:* || "${image_tag}" == */sysbench:* ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+template_replace() {
+  sed \
+    -e "s#__APP_NAME__#${APP_NAME}#g" \
+    -e "s#__NAMESPACE__#${NAMESPACE}#g" \
+    -e "s#__MYSQL_REPLICAS__#${MYSQL_REPLICAS}#g" \
+    -e "s#__STORAGE_CLASS__#${STORAGE_CLASS}#g" \
+    -e "s#__STORAGE_SIZE__#${STORAGE_SIZE}#g" \
+    -e "s#__MYSQL_ROOT_PASSWORD__#${MYSQL_ROOT_PASSWORD}#g" \
+    -e "s#__SERVICE_NAME__#${SERVICE_NAME}#g" \
+    -e "s#__STS_NAME__#${STS_NAME}#g" \
+    -e "s#__AUTH_SECRET__#${AUTH_SECRET}#g" \
+    -e "s#__PROBE_CONFIGMAP__#${PROBE_CONFIGMAP}#g" \
+    -e "s#__INIT_CONFIGMAP__#${INIT_CONFIGMAP}#g" \
+    -e "s#__MYSQL_CONFIGMAP__#${MYSQL_CONFIGMAP}#g" \
+    -e "s#__NODEPORT_SERVICE_NAME__#${NODEPORT_SERVICE_NAME}#g" \
+    -e "s#__NODE_PORT__#${NODE_PORT}#g" \
+    -e "s#__METRICS_SERVICE_NAME__#${METRICS_SERVICE_NAME}#g" \
+    -e "s#__METRICS_PORT__#${METRICS_PORT}#g" \
+    -e "s#__SERVICE_MONITOR_NAME__#${SERVICE_MONITOR_NAME}#g" \
+    -e "s#__SERVICE_MONITOR_INTERVAL__#${SERVICE_MONITOR_INTERVAL}#g" \
+    -e "s#__SERVICE_MONITOR_SCRAPE_TIMEOUT__#${SERVICE_MONITOR_SCRAPE_TIMEOUT}#g" \
+    -e "s#__ADDON_EXPORTER_DEPLOYMENT_NAME__#${ADDON_EXPORTER_DEPLOYMENT_NAME}#g" \
+    -e "s#__ADDON_EXPORTER_SERVICE_NAME__#${ADDON_EXPORTER_SERVICE_NAME}#g" \
+    -e "s#__ADDON_EXPORTER_SECRET__#${ADDON_EXPORTER_SECRET}#g" \
+    -e "s#__ADDON_EXPORTER_USERNAME__#${ADDON_EXPORTER_USERNAME}#g" \
+    -e "s#__ADDON_EXPORTER_PASSWORD__#${ADDON_EXPORTER_PASSWORD}#g" \
+    -e "s#__ADDON_MONITORING_TARGET__#${ADDON_MONITORING_TARGET}#g" \
+    -e "s#__ADDON_SERVICE_MONITOR_NAME__#${ADDON_SERVICE_MONITOR_NAME}#g" \
+    -e "s#__FLUENTBIT_CONFIGMAP__#${FLUENTBIT_CONFIGMAP}#g" \
+    -e "s#__MYSQL_SLOW_QUERY_TIME__#${MYSQL_SLOW_QUERY_TIME}#g" \
+    -e "s#__BACKUP_SCRIPT_CONFIGMAP__#${BACKUP_SCRIPT_CONFIGMAP}#g" \
+    -e "s#__BACKUP_CRONJOB_NAME__#${BACKUP_CRONJOB_NAME}#g" \
+    -e "s#__BACKUP_JOB_NAME__#${BACKUP_JOB_NAME:-mysql-backup-manual}#g" \
+    -e "s#__BACKUP_STORAGE_SECRET__#${BACKUP_STORAGE_SECRET}#g" \
+    -e "s#__BACKUP_NFS_SERVER__#${BACKUP_NFS_SERVER}#g" \
+    -e "s#__BACKUP_NFS_PATH__#${BACKUP_NFS_PATH}#g" \
+    -e "s#__BACKUP_ROOT_DIR__#${BACKUP_ROOT_DIR}#g" \
+    -e "s#__BACKUP_SCHEDULE__#${BACKUP_SCHEDULE}#g" \
+    -e "s#__BACKUP_RETENTION__#${BACKUP_RETENTION}#g" \
+    -e "s#__RESTORE_SNAPSHOT__#${RESTORE_SNAPSHOT}#g" \
+    -e "s#__MYSQL_RESTORE_MODE__#${MYSQL_RESTORE_MODE}#g" \
+    -e "s#__S3_ENDPOINT__#${S3_ENDPOINT}#g" \
+    -e "s#__S3_BUCKET__#${S3_BUCKET}#g" \
+    -e "s#__S3_PREFIX__#${S3_PREFIX}#g" \
+    -e "s#__S3_ACCESS_KEY__#${S3_ACCESS_KEY}#g" \
+    -e "s#__S3_SECRET_KEY__#${S3_SECRET_KEY}#g" \
+    -e "s#__S3_INSECURE__#${S3_INSECURE}#g" \
+    -e "s#__MYSQL_HOST__#${MYSQL_HOST}#g" \
+    -e "s#__MYSQL_PORT__#${MYSQL_PORT}#g" \
+    -e "s#__MYSQL_USER__#${MYSQL_USER}#g" \
+    -e "s#__MYSQL_AUTH_SECRET__#${MYSQL_AUTH_SECRET}#g" \
+    -e "s#__MYSQL_PASSWORD_KEY__#${MYSQL_PASSWORD_KEY}#g" \
+    -e "s#__MYSQL_TARGET_NAME__#${MYSQL_TARGET_NAME}#g" \
+    -e "s#__MYSQL_IMAGE__#${REGISTRY_ADDR}/kube4/mysql:8.0.45#g" \
+    -e "s#__MYSQL_EXPORTER_IMAGE__#${REGISTRY_ADDR}/kube4/mysqld-exporter:v0.15.1#g" \
+    -e "s#__FLUENTBIT_IMAGE__#${REGISTRY_ADDR}/kube4/fluent-bit:3.0.7#g" \
+    -e "s#__S3_CLIENT_IMAGE__#${REGISTRY_ADDR}/kube4/minio-mc:latest#g" \
+    -e "s#__BUSYBOX_IMAGE__#${REGISTRY_ADDR}/kube4/busybox:v1#g" \
+    -e "s#__SYSBENCH_IMAGE__#${REGISTRY_ADDR}/kube4/sysbench:1.0.20-ol9#g" \
+    -e "s#__RESTORE_JOB_NAME__#${RESTORE_JOB_NAME:-mysql-restore}#g" \
+    -e "s#__BENCHMARK_JOB_NAME__#${BENCHMARK_JOB_NAME:-mysql-benchmark}#g" \
+    -e "s#__BENCHMARK_CONCURRENCY__#${BENCHMARK_THREADS}#g" \
+    -e "s#__BENCHMARK_THREADS__#${BENCHMARK_THREADS}#g" \
+    -e "s#__BENCHMARK_TIME__#${BENCHMARK_TIME}#g" \
+    -e "s#__BENCHMARK_WARMUP_TIME__#${BENCHMARK_WARMUP_TIME}#g" \
+    -e "s#__BENCHMARK_TABLES__#${BENCHMARK_TABLES}#g" \
+    -e "s#__BENCHMARK_TABLE_SIZE__#${BENCHMARK_TABLE_SIZE}#g" \
+    -e "s#__BENCHMARK_DB__#${BENCHMARK_DB}#g" \
+    -e "s#__BENCHMARK_RAND_TYPE__#${BENCHMARK_RAND_TYPE}#g" \
+    -e "s#__BENCHMARK_KEEP_DATA__#${BENCHMARK_KEEP_DATA}#g" \
+    -e "s#__BENCHMARK_PROFILE__#${BENCHMARK_PROFILE}#g" \
+    -e "s#__BENCHMARK_HOST__#${BENCHMARK_HOST}#g" \
+    -e "s#__BENCHMARK_PORT__#${BENCHMARK_PORT}#g" \
+    -e "s#__BENCHMARK_USER__#${BENCHMARK_USER}#g"
+}
+
+apply_backup_support_manifests() {
+  render_manifest "${BACKUP_SUPPORT_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+apply_backup_schedule_manifests() {
+  render_manifest "${BACKUP_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+apply_restore_job() {
+  render_manifest "${RESTORE_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+apply_benchmark_job() {
+  render_manifest "${BENCHMARK_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+current_mysql_password() {
+  if [[ -n "${MYSQL_PASSWORD}" ]]; then
+    printf '%s' "${MYSQL_PASSWORD}"
+    return 0
+  fi
+
+  kubectl get secret -n "${NAMESPACE}" "${MYSQL_AUTH_SECRET}" -o "jsonpath={.data.${MYSQL_PASSWORD_KEY}}" | base64 -d
+}
+
+mysql_exec() {
+  local sql="$1"
+  local password runner_name
+  password="$(current_mysql_password)"
+  runner_name="mysql-client-$(date +%s)-$RANDOM"
+
+  kubectl run "${runner_name}" \
+    -n "${NAMESPACE}" \
+    --image="${REGISTRY_ADDR}/kube4/mysql:8.0.45" \
+    --restart=Never \
+    --env="MYSQL_PWD=${password}" \
+    --env="MYSQL_HOST=${MYSQL_HOST}" \
+    --env="MYSQL_PORT=${MYSQL_PORT}" \
+    --env="MYSQL_USER=${MYSQL_USER}" \
+    --env="SQL_QUERY=${sql}" \
+    --command -- /bin/sh -lc \
+    'mysql --host="${MYSQL_HOST}" --port="${MYSQL_PORT}" --protocol=TCP --user="${MYSQL_USER}" -Nse "$SQL_QUERY"' >/dev/null
+
+  if ! kubectl wait -n "${NAMESPACE}" --for=jsonpath='{.status.phase}'=Succeeded "pod/${runner_name}" --timeout="${WAIT_TIMEOUT}" >/dev/null 2>&1; then
+    kubectl logs -n "${NAMESPACE}" "pod/${runner_name}" --tail=-1 || true
+    kubectl delete pod -n "${NAMESPACE}" --ignore-not-found "${runner_name}" >/dev/null 2>&1 || true
+    die "临时 MySQL 客户端 Pod/${runner_name} 执行失败"
+  fi
+
+  local result
+  result="$(kubectl logs -n "${NAMESPACE}" "pod/${runner_name}" --tail=-1 || true)"
+  kubectl delete pod -n "${NAMESPACE}" --ignore-not-found "${runner_name}" >/dev/null 2>&1 || true
+  printf '%s' "${result}"
+}
+
+create_manual_backup_job() {
+  local job_name="${BACKUP_CRONJOB_NAME}-manual-$(date +%Y%m%d%H%M%S)-$RANDOM"
+
+  log "创建手工备份 Job ${job_name}" >&2
+  BACKUP_JOB_NAME="${job_name}" render_manifest "${BACKUP_JOB_MANIFEST}" \
+    | kubectl apply -n "${NAMESPACE}" -f - >/dev/null
+
+  echo "${job_name}"
+}
+
+create_restore_job() {
+  local restore_job_name="mysql-restore-$(date +%Y%m%d%H%M%S)-$RANDOM"
+
+  log "创建恢复 Job ${restore_job_name}" >&2
+  RESTORE_JOB_NAME="${restore_job_name}" render_manifest "${RESTORE_MANIFEST}" \
+    | kubectl apply -n "${NAMESPACE}" -f - >/dev/null
+
+  echo "${restore_job_name}"
+}
+
+create_benchmark_job() {
+  local benchmark_job_name="mysql-benchmark-$(date +%Y%m%d%H%M%S)-$RANDOM"
+
+  log "创建压测 Job ${benchmark_job_name}" >&2
+  BENCHMARK_JOB_NAME="${benchmark_job_name}" render_manifest "${BENCHMARK_MANIFEST}" \
+    | kubectl apply -n "${NAMESPACE}" -f - >/dev/null
+
+  echo "${benchmark_job_name}"
+}
+
+delete_backup_resources() {
+  kubectl delete cronjob -n "${NAMESPACE}" --ignore-not-found "${BACKUP_CRONJOB_NAME}" >/dev/null 2>&1 || true
+  kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${BACKUP_SCRIPT_CONFIGMAP}" >/dev/null 2>&1 || true
+  kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${BACKUP_STORAGE_SECRET}" >/dev/null 2>&1 || true
+}
+
+monitoring_bootstrap_auth_available() {
+  if [[ -n "${MYSQL_PASSWORD}" ]]; then
+    return 0
+  fi
+
+  secret_has_key "${MYSQL_AUTH_SECRET}" "${MYSQL_PASSWORD_KEY}"
 }
 
 install_app() {
@@ -1859,6 +3473,204 @@ NodePort 访问地址:
 
 手工压测:
 $( [[ "${BENCHMARK_ENABLED}" == "true" ]] && echo "./mysql-installer.run benchmark --namespace ${NAMESPACE} --report-dir ./reports -y" )
+EOF
+}
+
+show_post_addon_notes() {
+  section "Addon 后续建议"
+  cat <<EOF
+kubectl get pods -n ${NAMESPACE}
+kubectl get deploy -n ${NAMESPACE}
+kubectl get cronjob -n ${NAMESPACE}
+$( cluster_supports_service_monitor && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+
+业务影响说明:
+1. addon-install 默认不修改 MySQL StatefulSet
+2. monitoring addon 会额外创建 exporter Deployment
+3. backup addon 会额外创建 CronJob
+4. 如需日志 sidecar，请改用 install，并提前评估滚动更新窗口
+EOF
+}
+
+install_app() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+
+  if [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && ! cluster_supports_service_monitor; then
+    warn "集群中未安装 ServiceMonitor CRD，本次跳过 ServiceMonitor 资源"
+    SERVICE_MONITOR_ENABLED="false"
+  fi
+
+  section "安装 / 对齐 MySQL"
+  apply_mysql_manifests
+  if [[ "${BACKUP_ENABLED}" == "true" ]]; then
+    apply_backup_support_manifests
+    apply_backup_schedule_manifests
+  else
+    warn "当前关闭了备份组件，将清理 backup CronJob 及支持资源"
+  fi
+  cleanup_disabled_optional_resources
+  wait_for_statefulset_ready
+  wait_for_mysql_ready
+  success "MySQL 安装/对齐完成"
+}
+
+install_addons() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+
+  if addon_selected monitoring; then
+    if resource_exists statefulset "${STS_NAME}" && statefulset_has_container "mysqld-exporter"; then
+      die "当前 MySQL 已启用内嵌 exporter sidecar，不建议再叠加外置 monitoring addon"
+    fi
+
+    if addon_selected service-monitor && ! cluster_supports_service_monitor; then
+      warn "集群中未安装 ServiceMonitor CRD，本次仅安装 monitoring addon，跳过 service-monitor"
+      ADDONS="${ADDONS//service-monitor/}"
+      ADDONS="${ADDONS//,,/,}"
+      ADDONS="${ADDONS#,}"
+      ADDONS="${ADDONS%,}"
+      SERVICE_MONITOR_ENABLED="false"
+    fi
+
+    if ! resource_exists statefulset "${STS_NAME}" && [[ "${ADDON_MONITORING_TARGET_EXPLICIT}" != "true" ]]; then
+      die "为已有外部 MySQL 安装 monitoring addon 时，请显式提供 --monitoring-target"
+    fi
+
+    if monitoring_bootstrap_auth_available; then
+      ensure_addon_exporter_user
+    else
+      warn "未提供可写 MySQL 管理凭据，跳过 exporter 用户自动创建；请确保目标实例已存在 ${ADDON_EXPORTER_USERNAME} 账号"
+    fi
+
+    section "安装 monitoring addon"
+    apply_monitoring_addon_manifests
+    kubectl rollout status "deployment/${ADDON_EXPORTER_DEPLOYMENT_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
+    success "monitoring addon 安装完成"
+  fi
+
+  if addon_selected backup; then
+    if ! resource_exists statefulset "${STS_NAME}" && [[ "${MYSQL_HOST_EXPLICIT}" != "true" ]]; then
+      die "为已有外部 MySQL 安装 backup addon 时，请显式提供 --mysql-host"
+    fi
+
+    section "安装 backup addon"
+    apply_backup_support_manifests
+    apply_backup_schedule_manifests
+    success "backup addon 安装完成"
+  fi
+}
+
+run_backup() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+  apply_backup_support_manifests
+
+  section "执行手工备份"
+  local job_name
+  job_name="$(create_manual_backup_job)"
+  wait_for_job "${job_name}" || die "备份任务失败"
+}
+
+run_restore() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+  apply_backup_support_manifests
+
+  section "执行数据恢复"
+  local restore_job_name
+  restore_job_name="$(create_restore_job)"
+  wait_for_job "${restore_job_name}" || die "恢复任务失败"
+}
+
+verify_backup_restore() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+  apply_backup_support_manifests
+
+  section "执行备份/恢复闭环校验"
+
+  local snapshot_value changed_value restored_value backup_job restore_job report_path
+  snapshot_value="snapshot-$(date +%s)"
+  changed_value="changed-$(date +%s)"
+
+  log "写入校验数据"
+  mysql_exec "CREATE DATABASE IF NOT EXISTS offline_validation;"
+  mysql_exec "CREATE TABLE IF NOT EXISTS offline_validation.backup_restore_check (id INT PRIMARY KEY, marker VARCHAR(128) NOT NULL);"
+  mysql_exec "REPLACE INTO offline_validation.backup_restore_check (id, marker) VALUES (1, '${snapshot_value}');"
+
+  backup_job="$(create_manual_backup_job)"
+  wait_for_job "${backup_job}" || die "校验用备份任务失败"
+
+  log "修改数据，准备验证恢复结果"
+  mysql_exec "UPDATE offline_validation.backup_restore_check SET marker='${changed_value}' WHERE id=1;"
+
+  restore_job="$(create_restore_job)"
+  wait_for_job "${restore_job}" || die "校验用恢复任务失败"
+
+  restored_value="$(mysql_exec "SELECT marker FROM offline_validation.backup_restore_check WHERE id=1;")"
+  [[ "${restored_value}" == "${snapshot_value}" ]] || die "备份/恢复闭环校验失败，期望 ${snapshot_value}，实际 ${restored_value}"
+
+  report_path="$(write_report "backup-restore-${NAMESPACE}-$(date +%Y%m%d%H%M%S).txt" "$(cat <<EOF
+mysql backup/restore verification report
+generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+namespace=${NAMESPACE}
+mysql_target=${MYSQL_TARGET_NAME}
+backup_job=${backup_job}
+restore_job=${restore_job}
+backup_backend=${BACKUP_BACKEND}
+restore_mode=${MYSQL_RESTORE_MODE}
+snapshot_value=${snapshot_value}
+restored_value=${restored_value}
+status=success
+EOF
+)")"
+
+  success "备份/恢复闭环校验成功"
+  echo "报告文件: ${report_path}"
+}
+
+run_benchmark() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+
+  section "执行压测"
+  local benchmark_job report_body report_path
+  benchmark_job="$(create_benchmark_job)"
+  wait_for_job "${benchmark_job}" "benchmark" || die "压测任务失败，请根据上面的 Job/Pod 日志继续排查"
+
+  report_body="$(kubectl logs -n "${NAMESPACE}" "job/${benchmark_job}" --tail=-1)"
+  report_path="$(write_report "${benchmark_job}.txt" "${report_body}")"
+
+  success "压测完成"
+  echo "报告文件: ${report_path}"
+}
+
+show_post_install_notes() {
+  section "后续建议"
+  cat <<EOF
+kubectl get pods -n ${NAMESPACE}
+kubectl get svc -n ${NAMESPACE}
+kubectl get pvc -n ${NAMESPACE}
+$( [[ "${BACKUP_ENABLED}" == "true" ]] && echo "kubectl get cronjob -n ${NAMESPACE}" )
+$( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+
+集群内访问地址:
+${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:3306
+
+NodePort 访问地址:
+<node-ip>:${NODE_PORT}
+
+数据复用关键条件:
+1. uninstall 时不要加 --delete-pvc
+2. namespace 与 --sts-name 保持不变
+3. 再次执行 install 即可按当前开关重新对齐
 EOF
 }
 

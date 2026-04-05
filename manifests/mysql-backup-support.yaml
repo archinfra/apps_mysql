@@ -1,0 +1,346 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __BACKUP_SCRIPT_CONFIGMAP__
+data:
+  backup.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    STATUS_DIR="${STATUS_DIR:-/tmp/mysql-backup-status}"
+    BACKUP_BASE_DIR="${BACKUP_BASE_DIR:-/backup}"
+
+    mark_failed() {
+      mkdir -p "${STATUS_DIR}"
+      echo "failed" > "${STATUS_DIR}/status"
+      touch "${STATUS_DIR}/failed"
+    }
+
+    mark_done() {
+      mkdir -p "${STATUS_DIR}"
+      echo "done" > "${STATUS_DIR}/status"
+      touch "${STATUS_DIR}/done"
+    }
+
+    trap mark_failed ERR
+
+    wait_for_mysql() {
+      local retries=30
+      local delay=5
+      local attempt=1
+
+      while (( attempt <= retries )); do
+        if mysqladmin \
+          --host="${MYSQL_HOST}" \
+          --port="${MYSQL_PORT}" \
+          --protocol=TCP \
+          --user="${MYSQL_USER}" \
+          ping >/dev/null 2>&1; then
+          return 0
+        fi
+        echo "[WARN] mysql is not ready yet, retry ${attempt}/${retries}"
+        sleep "${delay}"
+        ((attempt++))
+      done
+
+      echo "[ERROR] mysql is not reachable"
+      exit 1
+    }
+
+    discover_user_databases() {
+      mysql \
+        --host="${MYSQL_HOST}" \
+        --port="${MYSQL_PORT}" \
+        --protocol=TCP \
+        --user="${MYSQL_USER}" \
+        -Nse "SHOW DATABASES" \
+        | grep -Ev '^(information_schema|performance_schema|mysql|sys)$' || true
+    }
+
+    prune_snapshots() {
+      local snapshot_dir="$1"
+      local retention="$2"
+      local snapshots=()
+
+      mapfile -t snapshots < <(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r)
+      if (( ${#snapshots[@]} <= retention )); then
+        return 0
+      fi
+
+      for snapshot in "${snapshots[@]:retention}"; do
+        rm -f "${snapshot_dir}/${snapshot}" \
+              "${snapshot_dir}/${snapshot}.sha256" \
+              "${snapshot_dir}/${snapshot%.sql.gz}.meta"
+      done
+    }
+
+    export MYSQL_PWD="${MYSQL_PASSWORD}"
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    component_root="${BACKUP_BASE_DIR}/${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${MYSQL_TARGET_NAME}"
+    snapshot_dir="${component_root}/snapshots"
+    snapshot_file="${snapshot_dir}/${timestamp}.sql.gz"
+    tmp_file="${snapshot_file}.tmp"
+    checksum_file="${snapshot_file}.sha256"
+    meta_file="${snapshot_dir}/${timestamp}.meta"
+
+    mkdir -p "${snapshot_dir}" "${STATUS_DIR}"
+    wait_for_mysql
+
+    mapfile -t databases < <(discover_user_databases)
+
+    if (( ${#databases[@]} == 0 )); then
+      printf -- "-- mysql backup captured no user databases at %s\n" "${timestamp}" | gzip -c > "${tmp_file}"
+    else
+      mysqldump \
+        --host="${MYSQL_HOST}" \
+        --port="${MYSQL_PORT}" \
+        --protocol=TCP \
+        --user="${MYSQL_USER}" \
+        --single-transaction \
+        --quick \
+        --routines \
+        --events \
+        --triggers \
+        --hex-blob \
+        --set-gtid-purged=OFF \
+        --add-drop-database \
+        --databases "${databases[@]}" | gzip -c > "${tmp_file}"
+    fi
+
+    mv "${tmp_file}" "${snapshot_file}"
+    sha256sum "${snapshot_file}" > "${checksum_file}"
+
+    {
+      echo "snapshot=${timestamp}.sql.gz"
+      echo "component=mysql"
+      echo "namespace=${NAMESPACE}"
+      echo "target_name=${MYSQL_TARGET_NAME}"
+      echo "host=${MYSQL_HOST}"
+      echo "port=${MYSQL_PORT}"
+      echo "user=${MYSQL_USER}"
+      echo "databases=${databases[*]:-none}"
+      echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${meta_file}"
+
+    echo "${timestamp}.sql.gz" > "${component_root}/latest.txt"
+    prune_snapshots "${snapshot_dir}" "${BACKUP_RETENTION}"
+
+    mark_done
+    echo "[INFO] mysql backup completed: ${snapshot_file}"
+
+  restore.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    BACKUP_BASE_DIR="${BACKUP_BASE_DIR:-/backup}"
+
+    wait_for_mysql() {
+      local retries=30
+      local delay=5
+      local attempt=1
+
+      while (( attempt <= retries )); do
+        if mysqladmin \
+          --host="${MYSQL_HOST}" \
+          --port="${MYSQL_PORT}" \
+          --protocol=TCP \
+          --user="${MYSQL_USER}" \
+          ping >/dev/null 2>&1; then
+          return 0
+        fi
+        echo "[WARN] mysql is not ready yet, retry ${attempt}/${retries}"
+        sleep "${delay}"
+        ((attempt++))
+      done
+
+      echo "[ERROR] mysql is not reachable"
+      exit 1
+    }
+
+    resolve_snapshot_file() {
+      local component_root="$1"
+      local snapshot_dir="$2"
+      local snapshot_name="${MYSQL_RESTORE_SNAPSHOT:-latest}"
+
+      if [[ "${snapshot_name}" == "latest" ]]; then
+        if [[ -f "${component_root}/latest.txt" ]]; then
+          snapshot_name="$(cat "${component_root}/latest.txt")"
+        else
+          snapshot_name="$(find "${snapshot_dir}" -maxdepth 1 -type f -name "*.sql.gz" -printf "%f\n" | sort -r | head -n 1)"
+        fi
+      fi
+
+      [[ -n "${snapshot_name}" ]] || {
+        echo "[ERROR] no mysql snapshot found"
+        exit 1
+      }
+
+      if [[ "${snapshot_name}" != *.sql.gz ]]; then
+        snapshot_name="${snapshot_name}.sql.gz"
+      fi
+
+      echo "${snapshot_dir}/${snapshot_name}"
+    }
+
+    drop_user_databases() {
+      local db
+      while IFS= read -r db; do
+        [[ -n "${db}" ]] || continue
+        mysql \
+          --host="${MYSQL_HOST}" \
+          --port="${MYSQL_PORT}" \
+          --protocol=TCP \
+          --user="${MYSQL_USER}" \
+          -e "DROP DATABASE IF EXISTS \`${db}\`;"
+      done < <(
+        mysql \
+          --host="${MYSQL_HOST}" \
+          --port="${MYSQL_PORT}" \
+          --protocol=TCP \
+          --user="${MYSQL_USER}" \
+          -Nse "SHOW DATABASES" \
+          | grep -Ev '^(information_schema|performance_schema|mysql|sys)$' || true
+      )
+    }
+
+    export MYSQL_PWD="${MYSQL_PASSWORD}"
+    component_root="${BACKUP_BASE_DIR}/${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${MYSQL_TARGET_NAME}"
+    snapshot_dir="${component_root}/snapshots"
+    snapshot_file="$(resolve_snapshot_file "${component_root}" "${snapshot_dir}")"
+
+    [[ -f "${snapshot_file}" ]] || {
+      echo "[ERROR] mysql restore snapshot not found: ${snapshot_file}"
+      exit 1
+    }
+
+    checksum_file="${snapshot_file}.sha256"
+
+    [[ ! -f "${checksum_file}" ]] || sha256sum -c "${checksum_file}"
+
+    wait_for_mysql
+
+    if [[ "${MYSQL_RESTORE_MODE}" == "wipe-all-user-databases" ]]; then
+      echo "[WARN] restore mode is wipe-all-user-databases, dropping existing user databases first"
+      drop_user_databases
+    fi
+
+    gunzip -c "${snapshot_file}" | mysql \
+      --host="${MYSQL_HOST}" \
+      --port="${MYSQL_PORT}" \
+      --protocol=TCP \
+      --user="${MYSQL_USER}"
+
+    echo "[INFO] mysql restore completed from ${snapshot_file}"
+
+  s3-prefetch.sh: |
+    #!/usr/bin/env sh
+    set -eu
+
+    mc_cmd() {
+      if [ "${S3_INSECURE:-false}" = "true" ]; then
+        mc --insecure "$@"
+      else
+        mc "$@"
+      fi
+    }
+
+    component_rel="${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${MYSQL_TARGET_NAME}"
+    remote_path="${S3_BUCKET}/${component_rel}"
+    if [ -n "${S3_PREFIX:-}" ]; then
+      remote_path="${S3_BUCKET}/${S3_PREFIX}/${component_rel}"
+    fi
+
+    mkdir -p "${BACKUP_BASE_DIR}/${component_rel}"
+    mc_cmd alias set backup "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" --api S3v4 >/dev/null
+
+    if mc_cmd ls "backup/${remote_path}" >/dev/null 2>&1; then
+      mc_cmd mirror "backup/${remote_path}" "${BACKUP_BASE_DIR}/${component_rel}"
+      echo "[INFO] s3 prefetch completed from ${remote_path}"
+    else
+      echo "[INFO] no remote snapshot found at ${remote_path}, skip prefetch"
+    fi
+
+  s3-upload.sh: |
+    #!/usr/bin/env sh
+    set -eu
+
+    mc_cmd() {
+      if [ "${S3_INSECURE:-false}" = "true" ]; then
+        mc --insecure "$@"
+      else
+        mc "$@"
+      fi
+    }
+
+    component_rel="${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${MYSQL_TARGET_NAME}"
+    remote_path="${S3_BUCKET}/${component_rel}"
+    if [ -n "${S3_PREFIX:-}" ]; then
+      remote_path="${S3_BUCKET}/${S3_PREFIX}/${component_rel}"
+    fi
+
+    local_dir="${BACKUP_BASE_DIR}/${component_rel}"
+    mkdir -p "${STATUS_DIR}"
+
+    timeout_seconds="${S3_SYNC_TIMEOUT:-3600}"
+    waited=0
+    while [ ! -f "${STATUS_DIR}/done" ]; do
+      if [ -f "${STATUS_DIR}/failed" ]; then
+        echo "[ERROR] backup container reported failure"
+        exit 1
+      fi
+      if [ "${waited}" -ge "${timeout_seconds}" ]; then
+        echo "[ERROR] wait backup artifact timeout"
+        exit 1
+      fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+
+    [ -d "${local_dir}" ] || {
+      echo "[ERROR] local backup directory not found: ${local_dir}"
+      exit 1
+    }
+
+    mc_cmd alias set backup "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" --api S3v4 >/dev/null
+    mc_cmd mirror --overwrite --remove "${local_dir}" "backup/${remote_path}"
+    echo "[INFO] s3 upload completed to ${remote_path}"
+
+  s3-download.sh: |
+    #!/usr/bin/env sh
+    set -eu
+
+    mc_cmd() {
+      if [ "${S3_INSECURE:-false}" = "true" ]; then
+        mc --insecure "$@"
+      else
+        mc "$@"
+      fi
+    }
+
+    component_rel="${BACKUP_ROOT_DIR}/mysql/${NAMESPACE}/${MYSQL_TARGET_NAME}"
+    remote_path="${S3_BUCKET}/${component_rel}"
+    if [ -n "${S3_PREFIX:-}" ]; then
+      remote_path="${S3_BUCKET}/${S3_PREFIX}/${component_rel}"
+    fi
+
+    local_dir="${BACKUP_BASE_DIR}/${component_rel}"
+    mkdir -p "${local_dir}"
+
+    mc_cmd alias set backup "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" --api S3v4 >/dev/null
+    mc_cmd ls "backup/${remote_path}" >/dev/null 2>&1 || {
+      echo "[ERROR] remote backup path not found: ${remote_path}"
+      exit 1
+    }
+    mc_cmd mirror "backup/${remote_path}" "${local_dir}"
+    echo "[INFO] s3 download completed from ${remote_path}"
+---
+#__BACKUP_S3_START__
+apiVersion: v1
+kind: Secret
+metadata:
+  name: __BACKUP_STORAGE_SECRET__
+type: Opaque
+stringData:
+  s3-access-key: "__S3_ACCESS_KEY__"
+  s3-secret-key: "__S3_SECRET_KEY__"
+#__BACKUP_S3_END__

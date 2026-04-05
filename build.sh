@@ -118,19 +118,33 @@ prepare_images() {
   while IFS= read -r item; do
     [[ -n "${item}" ]] || continue
 
-    local pull tag tar_name platform
-    pull="$(jq -r '.pull' <<<"${item}")"
+    local pull tag tar_name platform dockerfile
+    pull="$(jq -r '.pull // empty' <<<"${item}")"
     tag="$(jq -r '.tag // .pull' <<<"${item}")"
     tar_name="$(jq -r '.tar' <<<"${item}")"
     platform="$(jq -r '.platform // empty' <<<"${item}")"
+    dockerfile="$(jq -r '.dockerfile // empty' <<<"${item}")"
     [[ -n "${platform}" ]] || platform="${PLATFORM}"
 
-    log "Pull ${pull} (${platform})"
-    docker pull --platform "${platform}" "${pull}"
+    if [[ -n "${dockerfile}" ]]; then
+      if docker buildx version >/dev/null 2>&1; then
+        log "Build ${dockerfile} -> ${tag} (${platform}) via buildx"
+        docker buildx build --load --platform "${platform}" -t "${tag}" -f "${ROOT_DIR}/${dockerfile}" "${ROOT_DIR}"
+      else
+        if [[ "${platform}" != "${PLATFORM}" ]]; then
+          die "Image ${tag} requires ${platform}, but docker buildx is unavailable on this host"
+        fi
+        log "Build ${dockerfile} -> ${tag} (${platform})"
+        docker build -t "${tag}" -f "${ROOT_DIR}/${dockerfile}" "${ROOT_DIR}"
+      fi
+    else
+      log "Pull ${pull} (${platform})"
+      docker pull --platform "${platform}" "${pull}"
 
-    if [[ "${pull}" != "${tag}" ]]; then
-      log "Tag ${pull} -> ${tag}"
-      docker tag "${pull}" "${tag}"
+      if [[ "${pull}" != "${tag}" ]]; then
+        log "Tag ${pull} -> ${tag}"
+        docker tag "${pull}" "${tag}"
+      fi
     fi
 
     log "Save ${tag} -> ${TEMP_DIR}/images/${tar_name}"

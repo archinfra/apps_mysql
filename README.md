@@ -2,7 +2,7 @@
 
 面向 Kubernetes 的 MySQL 离线安装包，支持离线构建、整套对齐安装、已有实例 addon 补齐、NFS/S3 备份、恢复校验、监控集成和内置压测。
 
-## 先看这 7 条
+## 先看这 8 条
 
 1. `install` 不是一次性脚本，而是“整套声明式对齐”动作。
 2. 已有 MySQL 如果只想补监控或备份，优先使用 `addon-install`，默认不改 MySQL StatefulSet。
@@ -11,6 +11,7 @@
 5. 日志平台推荐做成 DaemonSet 级 Fluent Bit + ES / OpenSearch / Loki 等公共组件，不建议默认给 MySQL 再塞日志 sidecar。
 6. `install --enable-fluentbit` 仍然保留，用于必须采集容器内 slow log 文件的兼容场景，但要接受滚动更新。
 7. 默认不会删除 PVC，所以同 `namespace + sts-name` 的重装通常可以复用原数据。
+8. `monitoring / service-monitor / fluentbit / backup / benchmark` 这些特性开关默认全部开启，只有显式传 `--disable-*` 才会关闭。
 
 ## 目录结构
 
@@ -118,6 +119,17 @@ dist/mysql-installer-arm64.run.sha256
 1. 若必须读取 MySQL 容器内 slow log / error log 文件，可使用 `install --enable-fluentbit`。
 2. 这会修改 StatefulSet 模板，因此需要评估滚动更新窗口。
 
+研发快速查日志:
+
+1. 查看 MySQL 容器 stdout/stderr:
+   `kubectl logs -n <ns> <pod> -c mysql --tail=200`
+2. 若启用了 sidecar，查看 Fluent Bit:
+   `kubectl logs -n <ns> <pod> -c fluent-bit --tail=200`
+3. 直接看容器内文件:
+   `kubectl exec -n <ns> <pod> -c mysql -- ls -l /var/log/mysql`
+   `kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/error.log`
+   `kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/slow.log`
+
 ## 关键参数
 
 常用基础参数:
@@ -166,10 +178,22 @@ addon 参数:
 - backup nfs path: `/data/nfs-share`
 - backup root dir: `backups`
 - backup retention: `5`
+- MySQL data dir: `/var/lib/mysql`（固定，不提供外置参数修改）
 - monitoring sidecar: `enabled`
 - service monitor: `enabled`
 - fluent-bit sidecar: `enabled`
 - benchmark action: `enabled`
+
+## 压测可观测性
+
+`benchmark` 现在不再是黑盒等待，安装器会直接输出:
+
+1. 目标 MySQL 地址、用户名、Profile、并发、时长、表数、表大小。
+2. 实时日志查看命令:
+   `kubectl logs -n <ns> -f job/<job-name>`
+3. Pod 状态查看命令:
+   `kubectl get pod -n <ns> -l job-name=<job-name> -w`
+4. 若未显式传 `--wait-timeout`，benchmark 会按 `profile + time + warmup + tables + table-size` 自动放大等待时长，避免默认 10 分钟过早报错。
 
 ## 运行规则
 

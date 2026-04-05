@@ -1,21 +1,21 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: __RESTORE_JOB_NAME__
+  name: __BACKUP_JOB_NAME__
 spec:
-  backoffLimit: 0
+  backoffLimit: 1
   ttlSecondsAfterFinished: 86400
   template:
     spec:
       restartPolicy: Never
       #__BACKUP_S3_START__
       initContainers:
-        - name: s3-download
+        - name: s3-prefetch
           image: __S3_CLIENT_IMAGE__
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
-            - /scripts/s3-download.sh
+            - /scripts/s3-prefetch.sh
           env:
             - name: NAMESPACE
               value: "__NAMESPACE__"
@@ -24,7 +24,7 @@ spec:
             - name: BACKUP_ROOT_DIR
               value: "__BACKUP_ROOT_DIR__"
             - name: BACKUP_BASE_DIR
-              value: "/workspace/restore"
+              value: "/workspace/export"
             - name: S3_ENDPOINT
               value: "__S3_ENDPOINT__"
             - name: S3_BUCKET
@@ -46,16 +46,16 @@ spec:
           volumeMounts:
             - name: backup-scripts
               mountPath: /scripts
-            - name: restore-staging
-              mountPath: /workspace/restore
+            - name: export-staging
+              mountPath: /workspace/export
       #__BACKUP_S3_END__
       containers:
-        - name: mysql-restore
+        - name: mysql-backup
           image: __MYSQL_IMAGE__
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
-            - /scripts/restore.sh
+            - /scripts/backup.sh
           env:
             - name: NAMESPACE
               value: "__NAMESPACE__"
@@ -74,17 +74,17 @@ spec:
                   key: __MYSQL_PASSWORD_KEY__
             - name: BACKUP_ROOT_DIR
               value: "__BACKUP_ROOT_DIR__"
-            - name: MYSQL_RESTORE_SNAPSHOT
-              value: "__RESTORE_SNAPSHOT__"
-            - name: MYSQL_RESTORE_MODE
-              value: "__MYSQL_RESTORE_MODE__"
+            - name: BACKUP_RETENTION
+              value: "__BACKUP_RETENTION__"
             #__BACKUP_NFS_START__
             - name: BACKUP_BASE_DIR
               value: "/backup"
             #__BACKUP_NFS_END__
             #__BACKUP_S3_START__
             - name: BACKUP_BASE_DIR
-              value: "/workspace/restore"
+              value: "/workspace/export"
+            - name: STATUS_DIR
+              value: "/workspace/status"
             #__BACKUP_S3_END__
           volumeMounts:
             - name: backup-scripts
@@ -94,9 +94,55 @@ spec:
               mountPath: /backup
             #__BACKUP_NFS_END__
             #__BACKUP_S3_START__
-            - name: restore-staging
-              mountPath: /workspace/restore
+            - name: export-staging
+              mountPath: /workspace/export
+            - name: status-dir
+              mountPath: /workspace/status
             #__BACKUP_S3_END__
+        #__BACKUP_S3_START__
+        - name: s3-upload
+          image: __S3_CLIENT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /scripts/s3-upload.sh
+          env:
+            - name: NAMESPACE
+              value: "__NAMESPACE__"
+            - name: MYSQL_TARGET_NAME
+              value: "__MYSQL_TARGET_NAME__"
+            - name: BACKUP_ROOT_DIR
+              value: "__BACKUP_ROOT_DIR__"
+            - name: BACKUP_BASE_DIR
+              value: "/workspace/export"
+            - name: STATUS_DIR
+              value: "/workspace/status"
+            - name: S3_ENDPOINT
+              value: "__S3_ENDPOINT__"
+            - name: S3_BUCKET
+              value: "__S3_BUCKET__"
+            - name: S3_PREFIX
+              value: "__S3_PREFIX__"
+            - name: S3_INSECURE
+              value: "__S3_INSECURE__"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __BACKUP_STORAGE_SECRET__
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __BACKUP_STORAGE_SECRET__
+                  key: s3-secret-key
+          volumeMounts:
+            - name: backup-scripts
+              mountPath: /scripts
+            - name: export-staging
+              mountPath: /workspace/export
+            - name: status-dir
+              mountPath: /workspace/status
+      #__BACKUP_S3_END__
       volumes:
         - name: backup-scripts
           configMap:
@@ -109,6 +155,8 @@ spec:
             path: __BACKUP_NFS_PATH__
         #__BACKUP_NFS_END__
         #__BACKUP_S3_START__
-        - name: restore-staging
+        - name: export-staging
+          emptyDir: {}
+        - name: status-dir
           emptyDir: {}
         #__BACKUP_S3_END__

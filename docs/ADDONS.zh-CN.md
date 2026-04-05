@@ -92,6 +92,13 @@
 
 1. 日志统一交给平台级 DaemonSet 日志体系。
 2. Fluent Bit sidecar 只作为兼容路径保留在 `install` 里。
+3. 只有必须读取容器内 slow log / error log 文件时，才建议接受 sidecar 带来的滚动更新成本。
+
+研发快速查日志：
+
+1. `kubectl logs -n <ns> <pod> -c mysql --tail=200`
+2. `kubectl logs -n <ns> <pod> -c fluent-bit --tail=200`
+3. `kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/slow.log`
 
 ## 4. 常用命令
 

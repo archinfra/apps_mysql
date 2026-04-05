@@ -153,7 +153,26 @@
 1. `addon-install backup` 的 S3 端到端闭环。
 2. 日志 sidecar 路径，因为本次目标是“平台级日志优先”的 addon 方案。
 
-## 5. 建议理解
+## 5. 2026-04-04 压测可观测性与超时修复
+
+问题现象：
+
+1. 默认 `--wait-timeout 10m` 对 benchmark 不够，长时压测会被误判成失败。
+2. benchmark Job 实际仍在运行，但安装器没有持续输出过程日志，用户感知接近“黑盒”。
+
+根因：
+
+1. `benchmark standard` 会串行跑多个 profile，加上 prepare / cleanup，整体时长明显大于普通 backup Job。
+2. 安装器之前复用了通用 `wait_for_job`，没有针对 benchmark 做单独等待策略和日志透出。
+
+修复策略：
+
+1. benchmark 若未显式传 `--wait-timeout`，自动按 `profile + time + warmup + tables + table-size` 估算等待上限，并设置保底 30 分钟。
+2. benchmark 创建后直接输出 Job 名称、目标地址、并发、时长和实时查看命令。
+3. benchmark 等待期间自动输出 Pod 状态变化，并尝试实时跟随 `mysql-benchmark` 容器日志。
+4. benchmark manifest 增加 prepare / cleanup 阶段日志，避免长时间无输出。
+
+## 6. 建议理解
 
 从测试结果看，这次改造后的能力边界已经比较清晰：
 

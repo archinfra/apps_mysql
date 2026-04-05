@@ -16,23 +16,30 @@
   {
     "arch": "amd64",
     "platform": "linux/amd64",
-    "pull": "prom/mysqld-exporter:v0.15.1",
+    "pull": "quay.io/prometheus/mysqld-exporter:v0.15.1",
     "tag": "sealos.hub:5000/kube4/mysqld-exporter:v0.15.1",
     "tar": "mysqld-exporter-amd64.tar"
   },
   {
     "arch": "amd64",
     "platform": "linux/amd64",
-    "pull": "fluent/fluent-bit:3.0.7",
+    "pull": "ghcr.io/fluent/fluent-bit:3.0.7",
     "tag": "sealos.hub:5000/kube4/fluent-bit:3.0.7",
     "tar": "fluent-bit-amd64.tar"
   },
   {
     "arch": "amd64",
     "platform": "linux/amd64",
-    "pull": "minio/mc:latest",
+    "pull": "quay.io/minio/mc:latest",
     "tag": "sealos.hub:5000/kube4/minio-mc:latest",
     "tar": "minio-mc-amd64.tar"
+  },
+  {
+    "arch": "amd64",
+    "platform": "linux/amd64",
+    "dockerfile": "images/sysbench.Dockerfile",
+    "tag": "sealos.hub:5000/kube4/sysbench:1.0.20-ol9",
+    "tar": "sysbench-amd64.tar"
   },
   {
     "arch": "arm64",
@@ -51,22 +58,29 @@
   {
     "arch": "arm64",
     "platform": "linux/arm64",
-    "pull": "prom/mysqld-exporter:v0.15.1",
+    "pull": "quay.io/prometheus/mysqld-exporter:v0.15.1",
     "tag": "sealos.hub:5000/kube4/mysqld-exporter:v0.15.1",
     "tar": "mysqld-exporter-arm64.tar"
   },
   {
     "arch": "arm64",
     "platform": "linux/arm64",
-    "pull": "fluent/fluent-bit:3.0.7",
+    "pull": "ghcr.io/fluent/fluent-bit:3.0.7",
     "tag": "sealos.hub:5000/kube4/fluent-bit:3.0.7",
     "tar": "fluent-bit-arm64.tar"
   },
   {
     "arch": "arm64",
     "platform": "linux/arm64",
-    "pull": "minio/mc:latest",
+    "pull": "quay.io/minio/mc:latest",
     "tag": "sealos.hub:5000/kube4/minio-mc:latest",
     "tar": "minio-mc-arm64.tar"
+  },
+  {
+    "arch": "arm64",
+    "platform": "linux/arm64",
+    "dockerfile": "images/sysbench.Dockerfile",
+    "tag": "sealos.hub:5000/kube4/sysbench:1.0.20-ol9",
+    "tar": "sysbench-arm64.tar"
   }
 ]
