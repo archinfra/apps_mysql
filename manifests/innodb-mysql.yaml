@@ -391,6 +391,7 @@ spec:
         resources:
           requests:
             storage: __STORAGE_SIZE__
+#__FEATURE_NODEPORT_START__
 ---
 apiVersion: v1
 kind: Service
@@ -404,3 +405,4 @@ spec:
     - port: 3306
       targetPort: 3306
       nodePort: __NODE_PORT__
+#__FEATURE_NODEPORT_END__

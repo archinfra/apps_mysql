@@ -86,6 +86,7 @@ spec:
 
               mkdir -p /report /workspace/raw
               report_file="/report/${BENCHMARK_JOB_NAME}.txt"
+              report_json="/report/${BENCHMARK_JOB_NAME}.json"
               : > "${report_file}"
 
               mysql_version="$(cat /workspace/mysql-version.txt)"
@@ -94,6 +95,10 @@ spec:
 
               common_args="--db-driver=mysql --mysql-host=${MYSQL_HOST} --mysql-port=${MYSQL_PORT} --mysql-user=${MYSQL_USER} --mysql-password=${MYSQL_PASSWORD} --mysql-db=${BENCHMARK_DB} --threads=${BENCHMARK_THREADS} --time=${BENCHMARK_TIME} --warmup-time=${BENCHMARK_WARMUP_TIME} --tables=${BENCHMARK_TABLES} --table-size=${BENCHMARK_TABLE_SIZE} --rand-type=${BENCHMARK_RAND_TYPE} --report-interval=10 --histogram=on"
               compat_args="--db-ps-mode=disable --mysql-storage-engine=innodb"
+              if [ "${version_family}" = "8" ]; then
+                compat_args="${compat_args} --mysql-ignore-errors=all"
+              fi
+              profile_json_first="true"
 
               profile_to_script() {
                 case "$1" in
@@ -195,6 +200,30 @@ spec:
                   echo "latency_p99_ms=${p99_hist}"
                   echo
                 } >> "${report_file}"
+
+                if [ "${profile_json_first}" = "true" ]; then
+                  profile_json_first="false"
+                else
+                  printf ',\n' >> "${report_json}"
+                fi
+                cat >> "${report_json}" <<EOF
+    {
+      "profile": "${label}",
+      "transactions_total": ${transactions},
+      "transactions_per_sec": ${tps},
+      "queries_total": ${queries},
+      "queries_per_sec": ${qps},
+      "total_time_seconds": ${total_time},
+      "events_total": ${events},
+      "latency_min_ms": ${lat_min},
+      "latency_avg_ms": ${lat_avg},
+      "latency_max_ms": ${lat_max},
+      "latency_p50_ms": ${p50_hist},
+      "latency_p95_ms": ${p95_hist},
+      "latency_p95_native_ms": ${p95_native},
+      "latency_p99_ms": ${p99_hist}
+    }
+EOF
               }
 
               run_profile() {
@@ -231,6 +260,27 @@ spec:
                 echo
               } >> "${report_file}"
 
+              cat > "${report_json}" <<EOF
+{
+  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "mysql_version": "${mysql_version}",
+  "version_family": "${version_family}",
+  "compat_mode": "${compat_mode}",
+  "host": "${MYSQL_HOST}",
+  "port": ${MYSQL_PORT},
+  "user": "${MYSQL_USER}",
+  "benchmark_profile": "${BENCHMARK_PROFILE}",
+  "threads": ${BENCHMARK_THREADS},
+  "time_seconds": ${BENCHMARK_TIME},
+  "warmup_seconds": ${BENCHMARK_WARMUP_TIME},
+  "tables": ${BENCHMARK_TABLES},
+  "table_size": ${BENCHMARK_TABLE_SIZE},
+  "benchmark_db": "${BENCHMARK_DB}",
+  "rand_type": "${BENCHMARK_RAND_TYPE}",
+  "keep_data": "${BENCHMARK_KEEP_DATA}",
+  "profiles": [
+EOF
+
               echo "[INFO] preparing benchmark dataset" | tee -a "${report_file}"
               sysbench ${common_args} ${compat_args} "${prepare_script}" prepare
               echo "[INFO] benchmark dataset prepared" | tee -a "${report_file}"
@@ -251,6 +301,11 @@ spec:
                 sysbench ${common_args} ${compat_args} "${cleanup_script}" cleanup
                 echo "[INFO] benchmark dataset cleaned" | tee -a "${report_file}"
               fi
+
+              cat >> "${report_json}" <<'EOF'
+  ]
+}
+EOF
 
               cat "${report_file}"
           env:
