@@ -1,54 +1,62 @@
 # apps_mysql
 
-面向 Kubernetes 的 MySQL 离线安装器项目，支持：
+面向 Kubernetes 的 MySQL 离线安装器项目。
+
+当前支持：
 
 - 离线构建安装包
 - `install` 全量对齐安装
 - `addon-install` / `addon-uninstall` 外置能力补装
 - NFS / S3 备份
 - 恢复与备份恢复闭环校验
-- `sysbench` 压测
+- `benchmark` 压测
 - GitHub Actions 自动构建与发版
 
-当前版本：`v1.5.2`
+当前文档对应版本：`v1.5.3`
 
 ---
 
-## 1. 先看结论
+## 1. 先回答最关键的问题
 
-这套安装器现在遵循下面几条原则：
+### 1.1 根目录 `install.sh` 现在还有没有用
 
-1. `install` 是“声明式对齐”，不是一次性初始化脚本。
-2. 对已有 MySQL 追加能力时，优先用 `addon-install`，尽量不改 StatefulSet。
-3. 备份、恢复、备份恢复闭环校验这几个动作，必须显式提供可用的 MySQL 认证信息。
-4. `install.sh` 继续保留为最终单文件产物，但源码不再按函数拆，而是按职责拆成少量模块。
-5. benchmark 使用官方 `sysbench` 镜像，不再在本仓库里自建镜像。
+有用，而且必须保留。
+
+它现在的角色是：
+
+1. 最终分发的 installer 脚本产物
+2. `build.sh` 打包 `.run` 文件前使用的入口脚本
+3. 用户排障时最直接可查看的完整执行脚本
+4. CI 和本地做整体 shell 语法检查的目标文件
+
+但它已经不是“日常维护源码入口”。
+
+现在正确的维护方式是：
+
+1. 日常改动优先修改 `scripts/install/modules/*.sh`
+2. 再执行 `scripts/assemble-install.sh install.sh` 重新生成根目录 `install.sh`
+3. 不要把根目录 `install.sh` 当成长期手工维护的主文件
+
+### 1.2 为什么不再按函数拆分
+
+之前把 `install.sh` 拆成大量“一个函数一个文件”的做法，实际维护体验并不好：
+
+1. 一个需求经常跨很多函数，改动会散落到很多文件
+2. review 很难看出改的是“一个功能”还是“几段零散 shell”
+3. 新维护者不容易快速定位应该修改哪里
+4. 目录结构更像 shell AST，而不是工程目录
+
+现在改为“按职责拆分”：
+
+1. 最终产物仍然是单文件 `install.sh`
+2. 源码入口改成 `scripts/install/modules/*.sh`
+3. 每个模块负责一块明确职责，而不是单个函数
+
+这比函数级拆分更符合工程化维护。
 
 ---
 
-## 2. 为什么这次重新调整 installer 源码组织
-
-之前的做法是把 `install.sh` 按函数拆到很多小文件里，再在构建时拼回去。
-
-这个方案的问题很明显：
-
-- 一个功能点通常会跨多个函数，改动会散到很多文件里。
-- review 很难看出“这是一个备份体验改动”还是“这是一个 benchmark 逻辑改动”。
-- 新人维护时不容易知道应该去哪个文件改。
-- 函数数量越多，拆分粒度越碎，目录会越来越像“shell AST”，而不是工程目录。
-
-现在改成了“按职责拆分”的方式：
-
-- 保留最终产物：`install.sh`
-- 保留组装能力：`scripts/assemble-install.sh`
-- 源码入口改成：`scripts/install/modules/*.sh`
-- 每个模块负责一个明确的领域，而不是单个函数
-
-这更接近工程实践中的“按 bounded context / concern 拆分”，后续维护成本会更低。
-
----
-
-## 3. 仓库结构
+## 2. 仓库结构
 
 ```text
 .
@@ -75,22 +83,22 @@
 `-- docs/
 ```
 
-### 模块职责
+### 2.1 模块职责
 
 - `00-header.sh`
   变量、默认值、颜色、版本、镜像名
 - `10-core.sh`
   基础日志函数、通用小工具
 - `20-help.sh`
-  所有 help 文案
+  所有帮助文案
 - `30-args.sh`
   参数解析、addon 解析、默认值推导、动作门禁
 - `40-inputs-and-plan.sh`
-  输入校验、认证处理、执行计划打印、确认逻辑
+  输入校验、认证处理、执行计划、确认逻辑
 - `50-render-and-apply.sh`
   镜像准备、模板渲染、资源 apply
 - `60-runtime.sh`
-  wait/job/log/report/mysql 执行等运行时公共逻辑
+  wait/job/log/report/mysql 等运行时公共逻辑
 - `70-lifecycle-actions.sh`
   install / uninstall / status / addon 相关动作
 - `80-data-actions.sh`
@@ -98,11 +106,25 @@
 - `90-benchmark-and-main.sh`
   benchmark、收尾输出、cleanup、main
 
+### 2.2 哪些文件应该改
+
+应该改：
+
+- `scripts/install/modules/*.sh`
+- `manifests/*.yaml`
+- `images/image.json`
+- `build.sh`
+- 各类文档
+
+不应该作为长期源码入口直接改：
+
+- 根目录 `install.sh`
+
 ---
 
-## 4. 构建方式
+## 3. 构建方式
 
-### 本地构建
+### 3.1 本地构建
 
 ```bash
 chmod +x build.sh install.sh scripts/assemble-install.sh
@@ -111,12 +133,13 @@ chmod +x build.sh install.sh scripts/assemble-install.sh
 ./build.sh --arch all
 ```
 
-构建时会自动做两件事：
+构建时会自动执行：
 
 1. 从 `scripts/install/modules/*.sh` 组装出根目录 `install.sh`
 2. 根据 `images/image.json` 拉取并打包离线镜像
+3. 把 `install.sh` 与 payload 拼成 `.run` 文件
 
-构建产物：
+产物：
 
 ```text
 dist/mysql-installer-amd64.run
@@ -125,52 +148,38 @@ dist/mysql-installer-arm64.run
 dist/mysql-installer-arm64.run.sha256
 ```
 
-### GitHub Actions
+### 3.2 GitHub Actions
 
 - push 到 `main`：触发构建
 - push `v*` tag：触发构建并发布 release
 
----
+### 3.3 推荐维护动作
 
-## 5. 镜像策略
+如果你修改了 installer 源码，推荐顺序是：
 
-### 当前镜像来源
-
-- MySQL：仓库既有来源
-- mysqld-exporter：上游镜像
-- Fluent Bit：上游镜像
-- MinIO Client：上游镜像
-- BusyBox：既有来源
-- Sysbench：官方镜像 `openeuler/sysbench:1.0.20-oe2403sp1`
-
-### 为什么不再自建 sysbench
-
-之前仓库通过 `images/sysbench.Dockerfile` 临时装包生成 benchmark 镜像。
-
-这个链路的问题是：
-
-- 构建时间更长
-- 多一层 Dockerfile 维护成本
-- 依赖外部 yum/microdnf 源时，复现性更差
-- benchmark 只是运行时工具，没必要为它维护自定义镜像
-
-现在直接拉官方镜像，再离线打包进安装包，链路更简单。
+```bash
+bash scripts/assemble-install.sh install.sh
+bash -n install.sh
+bash -n build.sh
+bash -n scripts/assemble-install.sh
+```
 
 ---
 
-## 6. 命令模型
+## 4. 命令模型
 
-### install
+### 4.1 install
 
 用于全量安装或重新对齐 MySQL 资源。
 
 适合场景：
 
-- 首次安装
-- 调整副本数、存储、NodePort、功能开关
-- 把 sidecar / backup / benchmark 配置重新对齐到目标状态
+1. 首次安装
+2. 调整副本数、存储、NodePort、功能开关
+3. 重新对齐 StatefulSet 与相关资源
+4. 可以接受必要时的滚动更新
 
-### addon-install
+### 4.2 addon-install
 
 用于给“已经存在的 MySQL”补装外置能力。
 
@@ -180,42 +189,52 @@ dist/mysql-installer-arm64.run.sha256
 - `service-monitor`
 - `backup`
 
-原则上：
+原则：
 
-- 尽量新增外围资源
-- 不直接重写 MySQL StatefulSet
+1. 尽量新增外围资源
+2. 尽量不重写 MySQL StatefulSet
+3. 尽量不影响正在运行的 MySQL Pod
 
-### addon-uninstall
+### 4.3 addon-uninstall
 
 用于移除外置 addon 资源。
 
-### backup
+### 4.4 backup
 
 立即执行一次备份 Job。
 
 注意：
 
-- 这不是“安装定时备份”
-- 不会创建 CronJob
-- 只会创建一次性 Job
+1. 这不是安装定时备份
+2. 不会创建 CronJob
+3. 只会创建一次性 Job
 
-### restore
+### 4.5 restore
 
 基于快照执行恢复。
 
-### verify-backup-restore
+注意：
+
+1. `--restore-snapshot latest` 会优先读取 `latest.txt`
+2. 如果 `latest.txt` 指向的快照已不存在，会自动回退到最新 `.sql.gz`
+
+### 4.6 verify-backup-restore
 
 执行一次备份恢复闭环校验。
 
-### benchmark
+### 4.7 benchmark
 
-执行一次工程化 benchmark Job，并输出文本报告与 JSON 报告。
+执行一次工程化 benchmark Job，并输出：
+
+1. 完整日志 `.log`
+2. 文本报告 `.txt`
+3. JSON 报告 `.json`
 
 ---
 
-## 7. 关键参数
+## 5. 关键参数
 
-### 基础参数
+### 5.1 基础参数
 
 - `-n, --namespace`
 - `--root-password`
@@ -228,7 +247,7 @@ dist/mysql-installer-arm64.run.sha256
 - `--wait-timeout`
 - `-y, --yes`
 
-### NodePort 参数
+### 5.2 NodePort 参数
 
 - `--nodeport-enabled true|false`
 - `--enable-nodeport`
@@ -236,12 +255,12 @@ dist/mysql-installer-arm64.run.sha256
 - `--node-port`
 - `--nodeport-service-name`
 
-### 镜像参数
+### 5.3 镜像参数
 
 - `--registry <repo-prefix>`
 - `--skip-image-prepare`
 
-### MySQL 目标连接参数
+### 5.4 MySQL 目标连接参数
 
 - `--mysql-host`
 - `--mysql-port`
@@ -251,7 +270,7 @@ dist/mysql-installer-arm64.run.sha256
 - `--mysql-password-key`
 - `--mysql-target-name`
 
-### 备份参数
+### 5.5 备份参数
 
 - `--backup-backend nfs|s3`
 - `--backup-root-dir`
@@ -266,7 +285,7 @@ dist/mysql-installer-arm64.run.sha256
 - `--s3-secret-key`
 - `--s3-insecure`
 
-### benchmark 参数
+### 5.6 benchmark 参数
 
 - `--benchmark-profile`
 - `--benchmark-threads`
@@ -282,7 +301,60 @@ dist/mysql-installer-arm64.run.sha256
 
 ---
 
-## 8. 当前默认值
+## 6. 关键行为与边界
+
+### 6.1 backup / restore / verify-backup-restore 认证要求
+
+对以下动作：
+
+- `backup`
+- `restore`
+- `verify-backup-restore`
+- `addon-install --addons backup`
+
+现在要求显式提供可用的 MySQL 认证信息：
+
+1. 直接传 `--mysql-password`
+2. 或提供已存在的 `--mysql-auth-secret`
+
+不再默认回退到 `--root-password`。
+
+这是为了避免：
+
+1. 目标 Secret 不存在时误创建错误 Secret
+2. 把安装本体密码和运行期连接密码混为一谈
+
+### 6.2 NodePort 开关
+
+新增：
+
+- `--nodeport-enabled`
+- `--enable-nodeport`
+- `--disable-nodeport`
+
+NodePort Service 不再强制创建。
+
+### 6.3 镜像前缀可配置
+
+新增：
+
+- `--registry <repo-prefix>`
+
+用于把离线镜像重打标签到指定仓库前缀。
+
+### 6.4 benchmark 镜像策略
+
+benchmark 不再通过仓库内 Dockerfile 自建 sysbench 镜像。
+
+现在直接使用官方镜像：
+
+- `openeuler/sysbench:1.0.20-oe2403sp1`
+
+这样构建链路更短，复现性更高。
+
+---
+
+## 7. 当前默认值
 
 - namespace: `aict`
 - replicas: `1`
@@ -306,7 +378,7 @@ dist/mysql-installer-arm64.run.sha256
 - benchmark tables: `8`
 - benchmark table size: `100000`
 
-默认开启的能力：
+默认开启：
 
 - monitoring
 - service-monitor
@@ -316,84 +388,9 @@ dist/mysql-installer-arm64.run.sha256
 
 ---
 
-## 9. 这次重点修复和调整了什么
+## 8. 常用示例
 
-### 9.1 installer 源码组织
-
-- 从“每个函数一个文件”改成“每个职责一个模块”
-- assembler 不再依赖 `module-order.txt`
-- 直接按 `scripts/install/modules/*.sh` 的有序文件名组装
-
-### 9.2 backup / restore 认证逻辑
-
-对下面几个动作：
-
-- `backup`
-- `restore`
-- `verify-backup-restore`
-- `addon-install --addons backup`
-
-不再默认回退到 `--root-password`。
-
-现在要求：
-
-- 显式传 `--mysql-password`
-- 或提供已经存在的 `--mysql-auth-secret`
-
-这样能避免“目标 secret 不存在时误用默认 root 密码创建错误 secret”的问题。
-
-### 9.3 latest 快照回退
-
-当 `latest.txt` 指向的快照已经被清理后：
-
-- 不会直接报错终止
-- 会自动回退到当前目录里最新的 `.sql.gz`
-
-### 9.4 NodePort 开关
-
-新增：
-
-- `--nodeport-enabled`
-- `--enable-nodeport`
-- `--disable-nodeport`
-
-NodePort Service 不再强制创建。
-
-### 9.5 镜像仓库前缀可配置
-
-新增：
-
-- `--registry <repo-prefix>`
-
-用于把离线镜像重打标签到指定仓库前缀。
-
-### 9.6 benchmark 工程化输出
-
-benchmark 现在会输出：
-
-- 完整 Job 日志：`*.log`
-- 文本报告：`*.txt`
-- JSON 报告：`*.json`
-
-并且：
-
-- `warmup rows` 与正式 `table size` 已解耦
-- 对 MySQL 8 自动附加更宽松兼容参数
-- 日志跟随改成轮询 tail，避免重复启动多个 `kubectl logs -f`
-
-### 9.7 备份目录可写性探测
-
-备份脚本会在目标目录下先做写入探测：
-
-- `mkdir -p`
-- 写一个临时探针文件
-- 失败则明确报错目录不可写
-
----
-
-## 10. 常用示例
-
-### 10.1 首次安装，启用 NFS 备份
+### 8.1 首次安装，启用 NFS 备份
 
 ```bash
 ./dist/mysql-installer-amd64.run install \
@@ -405,7 +402,7 @@ benchmark 现在会输出：
   -y
 ```
 
-### 10.2 首次安装，但先关闭 NodePort 和备份
+### 8.2 首次安装，但关闭 NodePort 和备份
 
 ```bash
 ./dist/mysql-installer-amd64.run install \
@@ -416,7 +413,7 @@ benchmark 现在会输出：
   -y
 ```
 
-### 10.3 指定镜像前缀安装
+### 8.3 指定镜像前缀安装
 
 ```bash
 ./dist/mysql-installer-amd64.run install \
@@ -426,7 +423,7 @@ benchmark 现在会输出：
   -y
 ```
 
-### 10.4 给已有 MySQL 补监控
+### 8.4 给已有 MySQL 补监控
 
 ```bash
 ./dist/mysql-installer-amd64.run addon-install \
@@ -435,7 +432,7 @@ benchmark 现在会输出：
   -y
 ```
 
-### 10.5 给已有 MySQL 补定时备份
+### 8.5 给已有 MySQL 补定时备份
 
 ```bash
 ./dist/mysql-installer-amd64.run addon-install \
@@ -444,12 +441,14 @@ benchmark 现在会输出：
   --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
   --mysql-user root \
   --mysql-password 'StrongPassw0rd' \
+  --mysql-target-name mysql-demo \
   --backup-backend nfs \
   --backup-nfs-server 192.168.10.2 \
+  --backup-nfs-path /data/nfs-share \
   -y
 ```
 
-### 10.6 立即执行一次备份
+### 8.6 立即执行一次备份
 
 ```bash
 ./dist/mysql-installer-amd64.run backup \
@@ -464,7 +463,7 @@ benchmark 现在会输出：
   -y
 ```
 
-### 10.7 从 latest 恢复
+### 8.7 从 latest 恢复
 
 ```bash
 ./dist/mysql-installer-amd64.run restore \
@@ -481,7 +480,7 @@ benchmark 现在会输出：
   -y
 ```
 
-### 10.8 运行 benchmark
+### 8.8 运行 benchmark
 
 ```bash
 ./dist/mysql-installer-amd64.run benchmark \
@@ -501,9 +500,9 @@ benchmark 现在会输出：
 
 ---
 
-## 11. 你可以按这个 README 做验证
+## 9. 按 README 做验证
 
-### 11.1 构建验证
+### 9.1 构建验证
 
 检查 GitHub Actions 或 release 产物是否存在：
 
@@ -512,9 +511,7 @@ benchmark 现在会输出：
 - `mysql-installer-arm64.run`
 - `mysql-installer-arm64.run.sha256`
 
-### 11.2 安装验证
-
-执行 install 后检查：
+### 9.2 安装验证
 
 ```bash
 kubectl get pods -n <ns>
@@ -523,13 +520,13 @@ kubectl get svc -n <ns>
 kubectl get pvc -n <ns>
 ```
 
-如果 NodePort 开启，再检查：
+如果开启 NodePort，再检查：
 
 ```bash
 kubectl get svc -n <ns> <nodeport-service-name> -o yaml
 ```
 
-### 11.3 addon 验证
+### 9.3 addon 验证
 
 监控 addon：
 
@@ -547,27 +544,22 @@ kubectl get configmap -n <ns> mysql-backup-scripts
 kubectl get secret -n <ns>
 ```
 
-### 11.4 backup / restore 验证
-
-执行 `backup` 后检查：
+### 9.4 backup / restore 验证
 
 ```bash
 kubectl get jobs -n <ns>
-kubectl logs -n <ns> job/<backup-job-name>
+kubectl logs -n <ns> job/<job-name>
 ```
 
-执行 `restore` 后检查：
+如果 `latest.txt` 指向旧文件，可以删掉对应快照后再次执行：
 
 ```bash
-kubectl get jobs -n <ns>
-kubectl logs -n <ns> job/<restore-job-name>
+./dist/mysql-installer-amd64.run restore ... --restore-snapshot latest
 ```
 
-如果 `latest.txt` 指向旧文件，可以人工删掉对应快照后再次执行 `restore --restore-snapshot latest`，确认它会自动回退到当前最新 `.sql.gz`。
+确认它会自动回退到当前最新 `.sql.gz`。
 
-### 11.5 benchmark 验证
-
-执行 `benchmark` 后检查：
+### 9.5 benchmark 验证
 
 ```bash
 kubectl get jobs -n <ns>
@@ -575,43 +567,25 @@ kubectl logs -n <ns> job/<benchmark-job-name>
 ls -l ./reports
 ```
 
-你应该能看到：
+应看到：
 
 - `*.log`
 - `*.txt`
 - `*.json`
 
-JSON 报告里应该包含：
-
-- profile 信息
-- TPS / QPS
-- 延迟统计
-- latency histogram
-
 ---
 
-## 12. 维护约定
-
-### 修改 installer 时请遵守
+## 10. 维护约定
 
 1. 日常维护只改 `scripts/install/modules/*.sh`
-2. 不要手工直接改根目录 `install.sh`
+2. 不直接把根目录 `install.sh` 当主源码编辑
 3. 修改后执行 `scripts/assemble-install.sh install.sh`
-4. 新逻辑优先按职责归并到已有模块，不要再回退到“函数一个文件”
-
-### 新增模块的建议
-
-只有当某个职责已经明显过大时，再新增模块，比如：
-
-- 新增一整块新的 action
-- 新增一整类模板渲染能力
-- 新增完整的外置能力体系
-
-不要为了“形式上的拆分”而增加文件数量。
+4. 如果改动影响用户行为，同步更新 `README`、`docs/ARCHITECTURE.zh-CN.md`、`docs/ADDONS.zh-CN.md`、`docs/USE-CASES.zh-CN.md`
+5. 只有在职责边界明显扩张时才新增模块，不回退到“一个函数一个文件”
 
 ---
 
-## 13. 补充文档
+## 11. 相关文档
 
 - [架构说明](docs/ARCHITECTURE.zh-CN.md)
 - [Addon 说明](docs/ADDONS.zh-CN.md)

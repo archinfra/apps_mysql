@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.5.2"
+APP_VERSION="1.5.3"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
 MANIFEST_DIR="${WORKDIR}/manifests"
