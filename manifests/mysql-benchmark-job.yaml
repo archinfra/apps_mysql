@@ -238,27 +238,27 @@ spec:
               }
 
               json_profile_count=0
-              cat > "${report_json}" <<EOF
-{
-  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "mysql_version": "$(json_escape "${mysql_version}")",
-  "version_family": "$(json_escape "${version_family}")",
-  "compat_mode": "$(json_escape "${compat_mode}")",
-  "host": "$(json_escape "${MYSQL_HOST}")",
-  "port": ${MYSQL_PORT},
-  "user": "$(json_escape "${MYSQL_USER}")",
-  "benchmark_profile": "$(json_escape "${BENCHMARK_PROFILE}")",
-  "threads": ${BENCHMARK_THREADS},
-  "time_seconds": ${BENCHMARK_TIME},
-  "warmup_seconds": ${BENCHMARK_WARMUP_TIME},
-  "warmup_rows": ${BENCHMARK_WARMUP_ROWS},
-  "tables": ${BENCHMARK_TABLES},
-  "table_size": ${BENCHMARK_TABLE_SIZE},
-  "benchmark_db": "$(json_escape "${BENCHMARK_DB}")",
-  "rand_type": "$(json_escape "${BENCHMARK_RAND_TYPE}")",
-  "keep_data": "$(json_escape "${BENCHMARK_KEEP_DATA}")",
-  "profiles": [
-EOF
+              {
+                printf '{\n'
+                printf '  "generated_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '  "mysql_version": "%s",\n' "$(json_escape "${mysql_version}")"
+                printf '  "version_family": "%s",\n' "$(json_escape "${version_family}")"
+                printf '  "compat_mode": "%s",\n' "$(json_escape "${compat_mode}")"
+                printf '  "host": "%s",\n' "$(json_escape "${MYSQL_HOST}")"
+                printf '  "port": %s,\n' "${MYSQL_PORT}"
+                printf '  "user": "%s",\n' "$(json_escape "${MYSQL_USER}")"
+                printf '  "benchmark_profile": "%s",\n' "$(json_escape "${BENCHMARK_PROFILE}")"
+                printf '  "threads": %s,\n' "${BENCHMARK_THREADS}"
+                printf '  "time_seconds": %s,\n' "${BENCHMARK_TIME}"
+                printf '  "warmup_seconds": %s,\n' "${BENCHMARK_WARMUP_TIME}"
+                printf '  "warmup_rows": %s,\n' "${BENCHMARK_WARMUP_ROWS}"
+                printf '  "tables": %s,\n' "${BENCHMARK_TABLES}"
+                printf '  "table_size": %s,\n' "${BENCHMARK_TABLE_SIZE}"
+                printf '  "benchmark_db": "%s",\n' "$(json_escape "${BENCHMARK_DB}")"
+                printf '  "rand_type": "%s",\n' "$(json_escape "${BENCHMARK_RAND_TYPE}")"
+                printf '  "keep_data": "%s",\n' "$(json_escape "${BENCHMARK_KEEP_DATA}")"
+                printf '  "profiles": [\n'
+              } > "${report_json}"
 
               append_profile_json() {
                 local label="$1"
@@ -284,25 +284,25 @@ EOF
                   printf ',\n' >> "${report_json}"
                 fi
 
-                cat >> "${report_json}" <<EOF
-    {
-      "label": "$(json_escape "${label}")",
-      "transactions_total": $(numeric_or_zero "${transactions}"),
-      "transactions_per_sec": $(numeric_or_zero "${tps}"),
-      "queries_total": $(numeric_or_zero "${queries}"),
-      "queries_per_sec": $(numeric_or_zero "${qps}"),
-      "total_time_seconds": $(numeric_or_zero "${total_time}"),
-      "events_total": $(numeric_or_zero "${events}"),
-      "latency_min_ms": $(numeric_or_zero "${lat_min}"),
-      "latency_avg_ms": $(numeric_or_zero "${lat_avg}"),
-      "latency_max_ms": $(numeric_or_zero "${lat_max}"),
-      "latency_p50_ms": $(numeric_or_zero "${p50_hist}"),
-      "latency_p95_ms": $(numeric_or_zero "${p95_hist}"),
-      "latency_p95_native_ms": $(numeric_or_zero "${p95_native}"),
-      "latency_p99_ms": $(numeric_or_zero "${p99_hist}"),
-      "latency_histogram": ${histogram}
-    }
-EOF
+                {
+                  printf '    {\n'
+                  printf '      "label": "%s",\n' "$(json_escape "${label}")"
+                  printf '      "transactions_total": %s,\n' "$(numeric_or_zero "${transactions}")"
+                  printf '      "transactions_per_sec": %s,\n' "$(numeric_or_zero "${tps}")"
+                  printf '      "queries_total": %s,\n' "$(numeric_or_zero "${queries}")"
+                  printf '      "queries_per_sec": %s,\n' "$(numeric_or_zero "${qps}")"
+                  printf '      "total_time_seconds": %s,\n' "$(numeric_or_zero "${total_time}")"
+                  printf '      "events_total": %s,\n' "$(numeric_or_zero "${events}")"
+                  printf '      "latency_min_ms": %s,\n' "$(numeric_or_zero "${lat_min}")"
+                  printf '      "latency_avg_ms": %s,\n' "$(numeric_or_zero "${lat_avg}")"
+                  printf '      "latency_max_ms": %s,\n' "$(numeric_or_zero "${lat_max}")"
+                  printf '      "latency_p50_ms": %s,\n' "$(numeric_or_zero "${p50_hist}")"
+                  printf '      "latency_p95_ms": %s,\n' "$(numeric_or_zero "${p95_hist}")"
+                  printf '      "latency_p95_native_ms": %s,\n' "$(numeric_or_zero "${p95_native}")"
+                  printf '      "latency_p99_ms": %s,\n' "$(numeric_or_zero "${p99_hist}")"
+                  printf '      "latency_histogram": %s\n' "${histogram}"
+                  printf '    }\n'
+                } >> "${report_json}"
                 json_profile_count=$((json_profile_count + 1))
               }
 
