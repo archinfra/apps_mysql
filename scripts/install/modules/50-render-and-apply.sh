@@ -154,12 +154,29 @@ extract_payload() {
   rm -rf "${WORKDIR}"
   mkdir -p "${WORKDIR}" "${IMAGE_DIR}" "${MANIFEST_DIR}"
 
-  local payload_line
-  payload_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR + 1; exit }' "$0")"
-  [[ -n "${payload_line}" ]] || die "未找到载荷标记"
+  local marker_line payload_offset skip_bytes byte_hex
+  marker_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR; exit }' "$0")"
+  [[ -n "${marker_line}" ]] || die "未找到载荷标记"
+  payload_offset="$(( $(head -n "${marker_line}" "$0" | wc -c | tr -d ' ') + 1 ))"
+
+  skip_bytes=0
+  while :; do
+    byte_hex="$(dd if="$0" bs=1 skip="$((payload_offset + skip_bytes - 1))" count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "${byte_hex}" in
+      0a|0d)
+        skip_bytes=$((skip_bytes + 1))
+        ;;
+      "")
+        die "载荷边界异常，未找到有效的压缩数据"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
 
   log "正在解压到 ${WORKDIR}"
-  tail -n +"${payload_line}" "$0" | tar -xz -C "${WORKDIR}" >/dev/null 2>&1 || die "解压载荷失败"
+  tail -c +"$((payload_offset + skip_bytes))" "$0" | tar -xz -C "${WORKDIR}" >/dev/null 2>&1 || die "解压载荷失败"
 
   [[ -f "${MYSQL_MANIFEST}" ]] || die "缺少 MySQL manifest"
   [[ -f "${BACKUP_MANIFEST}" ]] || die "缺少 backup cronjob manifest"
@@ -309,5 +326,4 @@ apply_restore_job() {
 apply_benchmark_job() {
   render_manifest "${BENCHMARK_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
-
 

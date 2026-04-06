@@ -19,17 +19,23 @@ trap cleanup EXIT
 }
 
 : > "${TMP_FILE}"
-while IFS= read -r module_path; do
+mapfile -t modules < <(find "${MODULE_ROOT}" -maxdepth 1 -type f -name '*.sh' | LC_ALL=C sort)
+
+for ((i=0; i<${#modules[@]}; i++)); do
+  module_path="${modules[$i]}"
   [[ -f "${module_path}" ]] || {
     echo "module not found: ${module_path}" >&2
     exit 1
   }
   cat "${module_path}" >> "${TMP_FILE}"
-  if [[ "$(tail -c 1 "${module_path}" 2>/dev/null || true)" != $'\n' ]]; then
+  last_byte="$(tail -c 1 "${module_path}" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
+  if [[ "${last_byte}" != "0a" ]]; then
     printf '\n' >> "${TMP_FILE}"
   fi
-  printf '\n' >> "${TMP_FILE}"
-done < <(find "${MODULE_ROOT}" -maxdepth 1 -type f -name '*.sh' | LC_ALL=C sort)
+  if (( i + 1 < ${#modules[@]} )); then
+    printf '\n' >> "${TMP_FILE}"
+  fi
+done
 
 mv "${TMP_FILE}" "${OUTPUT_FILE}"
 chmod +x "${OUTPUT_FILE}"
