@@ -52,12 +52,12 @@ prepare_runtime_auth_secret() {
 }
 
 prompt_missing_values() {
-  if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
+  if needs_backup_storage && backup_plan_default_requested && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
     echo -ne "${YELLOW}请输入 NFS 服务器地址:${NC} "
     read -r BACKUP_NFS_SERVER
   fi
 
-  if needs_backup_storage && backup_backend_is_s3; then
+  if needs_backup_storage && backup_plan_default_requested && backup_backend_is_s3; then
     if [[ -z "${S3_ENDPOINT}" ]]; then
       echo -ne "${YELLOW}请输入 S3 Endpoint（如 https://minio.example.com）:${NC} "
       read -r S3_ENDPOINT
@@ -77,7 +77,9 @@ prompt_missing_values() {
     fi
   fi
 
-  [[ -n "${BACKUP_NFS_PATH}" ]] || BACKUP_NFS_PATH="/data/nfs-share"
+  if needs_backup_storage && backup_plan_default_requested; then
+    [[ -n "${BACKUP_NFS_PATH}" ]] || BACKUP_NFS_PATH="/data/nfs-share"
+  fi
 }
 
 
@@ -111,20 +113,26 @@ validate_inputs() {
   [[ "${BENCHMARK_TABLES}" =~ ^[0-9]+$ ]] || die "压测表数必须是数字"
   [[ "${BENCHMARK_TABLE_SIZE}" =~ ^[0-9]+$ ]] || die "压测单表数据量必须是数字"
   [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
-  [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
   [[ "${MYSQL_RESTORE_MODE}" =~ ^(merge|wipe-all-user-databases)$ ]] || die "restore-mode 仅支持 merge 或 wipe-all-user-databases"
   [[ "${BENCHMARK_PROFILE}" =~ ^(standard|oltp-point-select|oltp-read-only|oltp-read-write)$ ]] || die "benchmark-profile 仅支持 standard、oltp-point-select、oltp-read-only、oltp-read-write"
 
-  if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
-    die "使用 NFS 备份时必须提供 --backup-nfs-server"
+  if needs_backup_storage && backup_plan_default_requested; then
+    [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
+    [[ "${BACKUP_RETENTION}" =~ ^[0-9]+$ ]] || die "备份保留数量必须是数字"
+
+    if backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
+      die "使用 NFS 备份时必须提供 --backup-nfs-server"
+    fi
+
+    if backup_backend_is_s3; then
+      [[ -n "${S3_ENDPOINT}" ]] || die "使用 S3 备份时必须提供 --s3-endpoint"
+      [[ -n "${S3_BUCKET}" ]] || die "使用 S3 备份时必须提供 --s3-bucket"
+      [[ -n "${S3_ACCESS_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-access-key"
+      [[ -n "${S3_SECRET_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-secret-key"
+    fi
   fi
 
-  if needs_backup_storage && backup_backend_is_s3; then
-    [[ -n "${S3_ENDPOINT}" ]] || die "使用 S3 备份时必须提供 --s3-endpoint"
-    [[ -n "${S3_BUCKET}" ]] || die "使用 S3 备份时必须提供 --s3-bucket"
-    [[ -n "${S3_ACCESS_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-access-key"
-    [[ -n "${S3_SECRET_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-secret-key"
-  fi
+  backup_plan_validate_catalog
 
   validate_action_feature_gates
 }
@@ -141,6 +149,7 @@ mysql_auth_source_summary() {
 print_plan() {
   section "执行计划"
   echo "动作                    : ${ACTION}"
+  echo "产物包                  : $(package_profile_label)"
   echo "命名空间                : ${NAMESPACE}"
   echo "等待超时                : ${WAIT_TIMEOUT}"
 
@@ -229,18 +238,10 @@ print_plan() {
   esac
 
   if needs_backup_storage; then
-    echo "备份根目录              : ${BACKUP_ROOT_DIR}"
-    if backup_schedule_required; then
-      echo "备份计划                : ${BACKUP_SCHEDULE}"
-    fi
-    if backup_backend_is_nfs; then
-      echo "NFS 服务地址            : ${BACKUP_NFS_SERVER}"
-      echo "NFS 导出路径            : ${BACKUP_NFS_PATH}"
-    else
-      echo "S3 Endpoint             : ${S3_ENDPOINT}"
-      echo "S3 Bucket               : ${S3_BUCKET}"
-      echo "S3 Prefix               : ${S3_PREFIX:-<空>}"
-      echo "S3 Insecure             : ${S3_INSECURE}"
+    echo "backup plans            : ${#BACKUP_PLAN_CATALOG[@]}"
+    backup_plan_summary_lines
+    if [[ "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" ]]; then
+      echo "restore source          : ${BACKUP_RESTORE_SOURCE}"
     fi
   fi
 }
@@ -253,5 +254,3 @@ confirm_plan() {
   read -r answer
   [[ "${answer}" =~ ^[Yy]$ ]] || die "用户取消执行"
 }
-
-

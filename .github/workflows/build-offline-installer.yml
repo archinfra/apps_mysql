@@ -38,6 +38,11 @@ jobs:
         arch:
           - amd64
           - arm64
+        profile:
+          - integrated
+          - backup-restore
+          - benchmark
+          - monitoring
 
     steps:
       - name: Checkout
@@ -53,17 +58,35 @@ jobs:
         run: |
           chmod +x build.sh install.sh scripts/assemble-install.sh
 
+      - name: Resolve package metadata
+        id: meta
+        run: |
+          case "${{ matrix.profile }}" in
+            integrated)
+              echo "basename=mysql-installer" >> "$GITHUB_OUTPUT"
+              ;;
+            backup-restore)
+              echo "basename=mysql-backup-restore" >> "$GITHUB_OUTPUT"
+              ;;
+            benchmark)
+              echo "basename=mysql-benchmark" >> "$GITHUB_OUTPUT"
+              ;;
+            monitoring)
+              echo "basename=mysql-monitoring" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - name: Build installer
         run: |
-          ./build.sh --arch "${{ matrix.arch }}"
+          ./build.sh --arch "${{ matrix.arch }}" --profile "${{ matrix.profile }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mysql-installer-${{ matrix.arch }}
+          name: ${{ steps.meta.outputs.basename }}-${{ matrix.arch }}
           path: |
-            dist/mysql-installer-${{ matrix.arch }}.run
-            dist/mysql-installer-${{ matrix.arch }}.run.sha256
+            dist/${{ steps.meta.outputs.basename }}-${{ matrix.arch }}.run
+            dist/${{ steps.meta.outputs.basename }}-${{ matrix.arch }}.run.sha256
           if-no-files-found: error
 
   release:

@@ -1,11 +1,8 @@
-# MySQL 安装器常见使用场景
+# MySQL 工具包常见使用场景
 
-说明：
+## 1. 首次离线交付 MySQL
 
-1. 下文默认使用 release 产物 `./dist/mysql-installer-amd64.run`
-2. 对 `backup / restore / verify-backup-restore / addon-install --addons backup`，推荐始终显式提供 `--mysql-password` 或已有的 `--mysql-auth-secret`
-
-## 场景 1：首次安装，直接带上 NFS 备份
+适合使用：`mysql-installer-<arch>.run`
 
 ```bash
 ./dist/mysql-installer-amd64.run install \
@@ -19,176 +16,172 @@
 
 适合：
 
-1. 一开始就希望具备标准备份能力
-2. 环境里已有 NFS
+1. 首次安装
+2. 希望一次性具备基础备份能力
+3. 接受由 install 统一对齐整体资源
 
-## 场景 2：先把 MySQL 跑起来，后面再补能力
+---
 
-```bash
-./dist/mysql-installer-amd64.run install \
-  --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --disable-monitoring \
-  --disable-fluentbit \
-  --disable-backup \
-  -y
-```
+## 2. 已有 MySQL，只想加多中心定时备份
 
-后续补备份：
+适合使用：`mysql-backup-restore-<arch>.run`
 
 ```bash
-./dist/mysql-installer-amd64.run addon-install \
+./dist/mysql-backup-restore-amd64.run addon-install \
   --namespace mysql-demo \
   --addons backup \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+  --mysql-host 10.0.0.20 \
   --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
-  --mysql-target-name mysql-demo \
-  --backup-backend nfs \
-  --backup-nfs-server 192.168.10.2 \
-  --backup-nfs-path /data/nfs-share \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=dc1-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \
+  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=30;databases=orders,inventory' \
   -y
 ```
 
-后续补监控：
+适合：
+
+1. 业务库已经在跑
+2. 想加一个或多个异地备份计划
+3. 不希望动 MySQL StatefulSet
+
+---
+
+## 3. 同时写到多个 NFS 和多个 MinIO
 
 ```bash
-./dist/mysql-installer-amd64.run addon-install \
+./dist/mysql-backup-restore-amd64.run addon-install \
   --namespace mysql-demo \
-  --addons monitoring,service-monitor \
+  --addons backup \
+  --mysql-host 10.0.0.20 \
+  --mysql-user root \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7' \
+  --backup-plan 'name=nfs-b;backend=nfs;nfsServer=192.168.20.2;nfsPath=/data/nfs-b;schedule=5 2 * * *;retention=7' \
+  --backup-plan 'name=minio-a;backend=s3;s3Endpoint=https://minio-a.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=10 2 * * *;retention=30' \
+  --backup-plan 'name=minio-b;backend=s3;s3Endpoint=https://minio-b.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=15 2 * * *;retention=30' \
   -y
 ```
 
-## 场景 3：集群没有 ServiceMonitor CRD
+适合：
 
-仍然可以补监控：
+1. 需要多地留存
+2. 希望每个中心有独立计划名和调度
+3. 希望统一通过一套命令管理
+
+---
+
+## 4. 只导出某些库
 
 ```bash
-./dist/mysql-installer-amd64.run addon-install \
+./dist/mysql-backup-restore-amd64.run backup \
   --namespace mysql-demo \
-  --addons monitoring,service-monitor \
+  --mysql-host 10.0.0.20 \
+  --mysql-user root \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=biz-db;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;databases=orders,inventory;retention=7' \
   -y
 ```
 
-行为：
+适合：
 
-1. exporter Deployment 仍会安装
-2. `ServiceMonitor` 会被跳过
-3. 整个动作不会失败
+1. 只关心业务库
+2. 不希望把其他库一起打包
+3. 想把备份职责抽离为“指定业务域导出”
 
-## 场景 4：平台级 Fluent Bit + ES / OpenSearch / Loki
+---
 
-推荐策略：
-
-1. MySQL 只负责数据库本体和必要 addon
-2. 日志统一交给平台级 DaemonSet
-3. 不默认开启 MySQL sidecar 日志采集
-
-更适合：
+## 5. 只导出某些表
 
 ```bash
-./dist/mysql-installer-amd64.run install \
+./dist/mysql-backup-restore-amd64.run backup \
   --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --disable-fluentbit \
+  --mysql-host 10.0.0.20 \
+  --mysql-user root \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=audit-only;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \
   -y
 ```
 
-## 场景 5：必须采集 slow log 文件
+适合：
 
-如果平台日志体系拿不到容器内文件日志，可以回到 sidecar 路径：
+1. 只想保留审计、流水、归档类表
+2. 想降低备份体积
+3. 想把重点表同步到异地对象存储
+
+---
+
+## 6. 从指定中心恢复
 
 ```bash
-./dist/mysql-installer-amd64.run install \
+./dist/mysql-backup-restore-amd64.run restore \
   --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --enable-fluentbit \
+  --mysql-host 10.0.0.20 \
+  --mysql-user root \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --restore-source minio-a \
+  --restore-snapshot latest \
+  --restore-mode merge \
+  --disable-default-backup-plan \
+  --backup-plan 'name=minio-a;backend=s3;s3Endpoint=https://minio-a.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \
   -y
 ```
+
+适合：
+
+1. 主中心不可用
+2. 需要明确指定从某个异地中心恢复
+3. 希望恢复来源可审计、可控
 
 注意：
 
-1. 这不是 addon 路径
-2. 可能触发 StatefulSet 滚动更新
+1. 部分库/表备份建议使用 `merge`
+2. `wipe-all-user-databases` 只适合全量备份来源
 
-## 场景 6：重装但保留数据
+---
 
-步骤：
+## 7. 只想做压测
 
-1. 执行 `uninstall`，不要带 `--delete-pvc`
-2. 保持相同的 `namespace` 和 `--sts-name`
-3. 再次执行 `install`
-
-只要 PVC 还在，通常无需 restore。
-
-## 场景 7：PVC 丢失，只能从备份恢复
-
-步骤：
-
-1. 先执行 `install` 创建新的 MySQL 实例
-2. 再执行 `restore`
+适合使用：`mysql-benchmark-<arch>.run`
 
 ```bash
-./dist/mysql-installer-amd64.run restore \
+./dist/mysql-benchmark-amd64.run benchmark \
   --namespace mysql-demo \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+  --mysql-host 10.0.0.20 \
   --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
-  --mysql-target-name mysql-demo \
-  --backup-backend nfs \
-  --backup-nfs-server 192.168.10.2 \
-  --backup-nfs-path /data/nfs-share \
-  --restore-snapshot latest \
-  -y
-```
-
-## 场景 8：关闭 NodePort，仅走集群内访问
-
-```bash
-./dist/mysql-installer-amd64.run install \
-  --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --disable-nodeport \
-  -y
-```
-
-适合：
-
-1. 不希望额外暴露 NodePort
-2. 业务只通过集群内 Service 访问 MySQL
-
-## 场景 9：指定镜像前缀进行安装
-
-```bash
-./dist/mysql-installer-amd64.run install \
-  --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --registry harbor.example.com/kube4 \
-  -y
-```
-
-适合：
-
-1. 目标环境有自己的 Harbor / registry
-2. 希望安装时统一推送到指定镜像前缀
-
-## 场景 10：运行 benchmark 并拿 JSON 报告
-
-```bash
-./dist/mysql-installer-amd64.run benchmark \
-  --namespace mysql-demo \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
-  --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
+  --mysql-password '<MYSQL_PASSWORD>' \
   --benchmark-profile oltp-read-write \
-  --benchmark-warmup-rows 10000 \
-  --benchmark-table-size 300000 \
+  --benchmark-threads 64 \
+  --benchmark-time 300 \
   --report-dir ./reports \
   -y
 ```
 
-执行后重点检查：
+适合：
 
-1. `./reports/*.log`
-2. `./reports/*.txt`
-3. `./reports/*.json`
+1. 其他项目的 MySQL 只想做压测
+2. 不需要安装器和备份逻辑
+3. 希望直接拿 `.log / .txt / .json` 报告
+
+---
+
+## 8. 只想补监控
+
+适合使用：`mysql-monitoring-<arch>.run`
+
+```bash
+./dist/mysql-monitoring-amd64.run addon-install \
+  --namespace mysql-demo \
+  --addons monitoring,service-monitor \
+  --monitoring-target 10.0.0.20:3306 \
+  -y
+```
+
+适合：
+
+1. 目标 MySQL 已存在
+2. 只想补 exporter 和 ServiceMonitor
+3. 不希望同时引入备份和压测逻辑

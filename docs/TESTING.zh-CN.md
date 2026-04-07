@@ -1,133 +1,107 @@
-# MySQL 安装器测试说明
+# MySQL 工具包测试说明
 
-## 1. 当前阶段说明
+## 1. 本轮变更重点
 
-当前这一轮的主要变化是：
+这轮重点不是单点修 bug，而是能力抽象升级：
 
-1. installer 源码组织从“按函数拆分”改为“按职责模块拆分”
-2. benchmark 改为使用官方 `sysbench` 镜像
-3. README / 架构说明 / 使用说明 / addon 说明按新结构统一更新
-
-这一轮在本地没有做新的集群实跑，只做了静态校验。
+1. backup 升级为多 `backup plan`
+2. 支持多个 NFS、多个 MinIO/S3，以及混合多中心备份
+3. 支持按库、按表导出
+4. 支持 `--restore-source` 指定恢复来源
+5. build / GitHub Actions 改为构建多个产物包
 
 ---
 
 ## 2. 已完成的静态校验
 
-已完成：
+本地已完成：
 
-1. `bash -n install.sh`
-2. `bash -n build.sh`
-3. `bash -n scripts/assemble-install.sh`
-4. 重新组装后确认 `install.sh` 无重复函数定义
+1. `bash -n build.sh`
+2. `bash -n install.sh`
+3. `bash -n scripts/install/modules/*.sh`
+4. 重新组装 `install.sh`
 
-这意味着：
+说明：
 
 1. 组装链路是通的
-2. 最终脚本语法层面可解析
-3. 但仍需要远端环境做真实行为验证
+2. 最终脚本语法无错误
+3. 多包构建逻辑在脚本层面已接通
 
 ---
 
-## 3. 历史远端验证结论
+## 3. 本轮建议重点实测
 
-### 3.1 已验证通过的主链路
+### 3.1 多计划备份
 
-历史上已验证通过：
+建议验证：
 
-1. `install` 基线安装
-2. `backup`
-3. `verify-backup-restore`
-4. `benchmark`
-5. `uninstall` 后保留 PVC 再执行 `install` 的数据复用
-
-### 3.2 已验证通过的 addon 能力
-
-历史上已验证通过：
-
-1. `addon-status`
-2. `addon-install backup`
-3. `addon-install monitoring`
-4. 无 `ServiceMonitor` CRD 时跳过逻辑
-5. `addon-uninstall monitoring`
-6. `addon-uninstall backup`
-7. addon 路径下 MySQL Pod UID 不变
-
----
-
-## 4. 当前还需要重点验证什么
-
-针对这轮结构和文档调整，建议优先验证：
-
-1. GitHub Actions 是否能正常从 `scripts/install/modules/*.sh` 组装出 `install.sh`
-2. 构建阶段是否能直接拉取官方 `openeuler/sysbench` 镜像
-3. `install --disable-nodeport` 是否不再创建 NodePort Service
-4. `addon-install --addons backup` 是否仍要求显式 MySQL 认证
-5. `restore --restore-snapshot latest` 是否能在 `latest.txt` 失效时自动回退
-6. `benchmark` 是否仍能输出 `.log / .txt / .json`
-7. README 中的典型命令是否都能跑通
-
----
-
-## 5. 推荐验证顺序
-
-### 5.1 构建验证
-
-先看 Actions 产物是否生成：
-
-1. `mysql-installer-amd64.run`
-2. `mysql-installer-amd64.run.sha256`
-3. `mysql-installer-arm64.run`
-4. `mysql-installer-arm64.run.sha256`
-
-### 5.2 install 验证
-
-建议优先验证两条：
-
-1. 默认安装链路
-2. `--disable-nodeport` 链路
+1. 默认主计划 + 额外 `--backup-plan`
+2. `--disable-default-backup-plan` 后仅保留显式计划
+3. 多个 NFS 同时落地
+4. NFS + MinIO 混合落地
 
 检查：
 
 ```bash
-kubectl get pods -n <ns>
-kubectl get sts -n <ns>
-kubectl get svc -n <ns>
-kubectl get pvc -n <ns>
+kubectl get cronjob -n <ns>
+kubectl get secret -n <ns>
+kubectl logs -n <ns> job/<manual-backup-job>
 ```
 
-### 5.3 addon 验证
+### 3.2 范围导出
 
 建议验证：
 
-1. `addon-install monitoring,service-monitor`
-2. `addon-install backup`
+1. `--backup-databases`
+2. `--backup-tables`
+3. meta 文件中是否能看到 scope / databases / tables
 
-重点确认 MySQL Pod UID 是否变化。
-
-### 5.4 backup / restore 验证
-
-建议验证：
-
-1. 手工 `backup`
-2. `restore --restore-snapshot latest`
-3. latest 指向失效快照时的回退行为
-
-### 5.5 benchmark 验证
+### 3.3 restore-source
 
 建议验证：
 
-1. benchmark Job 可启动
-2. 报告目录里同时生成 `.log / .txt / .json`
-3. JSON 里能看到 profile、TPS/QPS、延迟统计
+1. `--restore-source <plan-name>`
+2. `--restore-source auto`
+3. 指定 plan 不存在时的失败提示
+
+### 3.4 危险模式边界
+
+建议验证：
+
+1. 部分库/表备份 + `--restore-mode merge`
+2. 部分库/表备份 + `--restore-mode wipe-all-user-databases` 是否被阻断
+3. `verify-backup-restore` 是否只挑覆盖校验表的 plan 作为恢复来源
+
+### 3.5 多产物构建
+
+建议检查 Actions 或本地构建结果：
+
+1. `mysql-installer-<arch>.run`
+2. `mysql-backup-restore-<arch>.run`
+3. `mysql-benchmark-<arch>.run`
+4. `mysql-monitoring-<arch>.run`
+
+每个产物都应带对应 `.sha256`。
 
 ---
 
-## 6. 建议理解
+## 4. 推荐验证顺序
 
-从当前架构看，正确的验证心智模型应该是：
+1. 先验证 `build.sh --arch amd64 --profile all`
+2. 再验证 `mysql-backup-restore-*.run` 的多中心 backup addon
+3. 再验证手工 `backup`
+4. 再验证 `restore --restore-source`
+5. 最后验证 `mysql-benchmark-*.run` 和 `mysql-monitoring-*.run`
 
-1. `install` 负责本体和 StatefulSet 级能力
-2. `addon-install` 负责外围补能力
-3. 根目录 `install.sh` 是最终产物，不是主要源码入口
-4. `scripts/install/modules/*.sh` 才是后续持续维护的源码入口
+---
+
+## 5. 远端实测建议
+
+如果使用你的测试机：
+
+1. 先做一个单库或单表的小范围 plan 冒烟
+2. 再上多中心计划
+3. 再做 restore-source 指定恢复
+4. 最后再做完整闭环校验
+
+这样更容易在早期发现路径、凭据、对象存储目录或 NFS 挂载问题。

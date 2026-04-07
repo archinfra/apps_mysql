@@ -72,13 +72,6 @@ payload_cache_ready() {
 
   [[ -f "${signature_file}" ]] || return 1
   [[ "$(cat "${signature_file}")" == "${expected_signature}" ]] || return 1
-  [[ -f "${MYSQL_MANIFEST}" ]] || return 1
-  [[ -f "${BACKUP_MANIFEST}" ]] || return 1
-  [[ -f "${BACKUP_SUPPORT_MANIFEST}" ]] || return 1
-  [[ -f "${BACKUP_JOB_MANIFEST}" ]] || return 1
-  [[ -f "${RESTORE_MANIFEST}" ]] || return 1
-  [[ -f "${BENCHMARK_MANIFEST}" ]] || return 1
-  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || return 1
   [[ -f "${IMAGE_JSON}" ]] || return 1
 }
 
@@ -216,6 +209,7 @@ render_manifest() {
 
 
 apply_mysql_manifests() {
+  require_manifest_file "${MYSQL_MANIFEST}"
   render_manifest "${MYSQL_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
@@ -226,6 +220,7 @@ apply_backup_manifests() {
 
 
 apply_monitoring_addon_manifests() {
+  require_manifest_file "${MONITORING_ADDON_MANIFEST}"
   render_manifest "${MONITORING_ADDON_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
@@ -270,13 +265,6 @@ extract_payload() {
   log "正在解压元数据到 ${WORKDIR}"
   payload_extract_entries "${WORKDIR}" "./manifests" "./images/image.json" || die "解压载荷元数据失败"
 
-  [[ -f "${MYSQL_MANIFEST}" ]] || die "缺少 MySQL manifest"
-  [[ -f "${BACKUP_MANIFEST}" ]] || die "缺少 backup cronjob manifest"
-  [[ -f "${BACKUP_SUPPORT_MANIFEST}" ]] || die "缺少 backup support manifest"
-  [[ -f "${BACKUP_JOB_MANIFEST}" ]] || die "缺少 backup job manifest"
-  [[ -f "${RESTORE_MANIFEST}" ]] || die "缺少 restore manifest"
-  [[ -f "${BENCHMARK_MANIFEST}" ]] || die "缺少 benchmark manifest"
-  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || die "缺少 monitoring addon manifest"
   [[ -f "${IMAGE_JSON}" ]] || die "缺少 image.json"
 
   printf '%s\n' "${expected_signature}" > "${signature_file}"
@@ -295,10 +283,13 @@ image_needed_for_current_action() {
       if addon_selected monitoring && [[ "${image_tag}" == */mysqld-exporter:* ]]; then
         return 0
       fi
+      if addon_selected monitoring && [[ "${image_tag}" == */mysql:* ]]; then
+        return 0
+      fi
       if addon_selected backup && [[ "${image_tag}" == */mysql:* ]]; then
         return 0
       fi
-      if addon_selected backup && backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+      if addon_selected backup && backup_plan_any_uses_backend s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
         return 0
       fi
       return 1
@@ -307,7 +298,7 @@ image_needed_for_current_action() {
       if [[ "${image_tag}" == */mysql:* ]]; then
         return 0
       fi
-      if backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+      if backup_plan_any_uses_backend s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
         return 0
       fi
       return 1
@@ -359,11 +350,15 @@ template_replace() {
     -e "s#__BACKUP_CRONJOB_NAME__#${BACKUP_CRONJOB_NAME}#g" \
     -e "s#__BACKUP_JOB_NAME__#${BACKUP_JOB_NAME:-mysql-backup-manual}#g" \
     -e "s#__BACKUP_STORAGE_SECRET__#${BACKUP_STORAGE_SECRET}#g" \
+    -e "s#__BACKUP_PLAN_NAME__#${BACKUP_PLAN_NAME}#g" \
+    -e "s#__BACKUP_STORE_NAME__#${BACKUP_STORE_NAME}#g" \
     -e "s#__BACKUP_NFS_SERVER__#${BACKUP_NFS_SERVER}#g" \
     -e "s#__BACKUP_NFS_PATH__#${BACKUP_NFS_PATH}#g" \
     -e "s#__BACKUP_ROOT_DIR__#${BACKUP_ROOT_DIR}#g" \
     -e "s#__BACKUP_SCHEDULE__#${BACKUP_SCHEDULE}#g" \
     -e "s#__BACKUP_RETENTION__#${BACKUP_RETENTION}#g" \
+    -e "s#__BACKUP_DATABASES__#${BACKUP_DATABASES}#g" \
+    -e "s#__BACKUP_TABLES__#${BACKUP_TABLES}#g" \
     -e "s#__RESTORE_SNAPSHOT__#${RESTORE_SNAPSHOT}#g" \
     -e "s#__MYSQL_RESTORE_MODE__#${MYSQL_RESTORE_MODE}#g" \
     -e "s#__S3_ENDPOINT__#${S3_ENDPOINT}#g" \
@@ -402,21 +397,31 @@ template_replace() {
     -e "s#__BENCHMARK_USER__#${BENCHMARK_USER}#g"
 }
 
+require_manifest_file() {
+  local file_path="$1"
+  [[ -f "${file_path}" ]] || die "当前产物包缺少必需 manifest: ${file_path}"
+}
+
+
 apply_backup_support_manifests() {
+  require_manifest_file "${BACKUP_SUPPORT_MANIFEST}"
   render_manifest "${BACKUP_SUPPORT_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 apply_backup_schedule_manifests() {
+  require_manifest_file "${BACKUP_MANIFEST}"
   render_manifest "${BACKUP_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 apply_restore_job() {
+  require_manifest_file "${RESTORE_MANIFEST}"
   render_manifest "${RESTORE_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 apply_benchmark_job() {
+  require_manifest_file "${BENCHMARK_MANIFEST}"
   render_manifest "${BENCHMARK_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }

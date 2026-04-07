@@ -1,58 +1,48 @@
 # apps_mysql
 
-面向 Kubernetes 的 MySQL 离线安装器项目。
+面向 Kubernetes 的 MySQL 离线交付与运维工具包。
 
-当前支持：
+当前版本：`v1.5.3`
 
-- 离线构建安装包
-- `install` 全量对齐安装
-- `addon-install` / `addon-uninstall` 外置能力补装
-- NFS / S3 备份
-- 恢复与备份恢复闭环校验
-- `benchmark` 压测
-- GitHub Actions 自动构建与发版
+这套项目不再只提供一个“大一统安装器”，而是同时支持：
 
-当前文档对应版本：`v1.5.3`
+- 集成包：整体安装、对齐、补能力、备份恢复、压测
+- 备份恢复包：只做 backup / restore / verify-backup-restore
+- 压测包：只做 benchmark
+- 监控包：只做 monitoring / service-monitor addon
+
+这样既保留了离线集成交付的优势，也能把压测、备份恢复、监控这些能力抽出来给其他 MySQL 场景复用。
 
 ---
 
-## 1. 先回答最关键的问题
+## 1. 最终方案概览
 
-### 1.1 根目录 `install.sh` 现在还有没有用
+### 1.1 产品形态
 
-有用，而且必须保留。
+当前构建会产出四类 `.run` 包：
 
-它现在的角色是：
+- `mysql-installer-<arch>.run`
+- `mysql-backup-restore-<arch>.run`
+- `mysql-benchmark-<arch>.run`
+- `mysql-monitoring-<arch>.run`
 
-1. 最终分发的 installer 脚本产物
-2. `build.sh` 打包 `.run` 文件前使用的入口脚本
-3. 用户排障时最直接可查看的完整执行脚本
-4. CI 和本地做整体 shell 语法检查的目标文件
+它们共用同一套源码模块、manifest 与运行逻辑，但按职责裁剪镜像、动作和帮助信息。
 
-但它已经不是“日常维护源码入口”。
+### 1.2 备份恢复模型
 
-现在正确的维护方式是：
+备份能力已经从“单一后端配置”升级为“backup plan 模型”：
 
-1. 日常改动优先修改 `scripts/install/modules/*.sh`
-2. 再执行 `scripts/assemble-install.sh install.sh` 重新生成根目录 `install.sh`
-3. 不要把根目录 `install.sh` 当成长期手工维护的主文件
+- 一个 `backup plan` 对应一个目的地、一条调度、一个保留策略和一个导出范围
+- 可以有多个 NFS、多个 MinIO/S3，也可以混合使用
+- 可以保留默认主计划，也可以用 `--disable-default-backup-plan` 后全部显式定义
+- 可以导出全量、指定库，或指定表
 
-### 1.2 为什么不再按函数拆分
+这意味着现在既支持：
 
-之前把 `install.sh` 拆成大量“一个函数一个文件”的做法，实际维护体验并不好：
-
-1. 一个需求经常跨很多函数，改动会散落到很多文件
-2. review 很难看出改的是“一个功能”还是“几段零散 shell”
-3. 新维护者不容易快速定位应该修改哪里
-4. 目录结构更像 shell AST，而不是工程目录
-
-现在改为“按职责拆分”：
-
-1. 最终产物仍然是单文件 `install.sh`
-2. 源码入口改成 `scripts/install/modules/*.sh`
-3. 每个模块负责一块明确职责，而不是单个函数
-
-这比函数级拆分更符合工程化维护。
+- 日常定时主备份
+- 额外再加一条异地定时备份
+- 同时写入多个存储中心
+- 单独导出某些业务库或某些表
 
 ---
 
@@ -73,7 +63,9 @@
 |           |-- 00-header.sh
 |           |-- 10-core.sh
 |           |-- 20-help.sh
+|           |-- 25-package-profile.sh
 |           |-- 30-args.sh
+|           |-- 35-backup-plans.sh
 |           |-- 40-inputs-and-plan.sh
 |           |-- 50-render-and-apply.sh
 |           |-- 60-runtime.sh
@@ -83,199 +75,91 @@
 `-- docs/
 ```
 
-### 2.1 模块职责
+维护约定：
 
-- `00-header.sh`
-  变量、默认值、颜色、版本、镜像名
-- `10-core.sh`
-  基础日志函数、通用小工具
-- `20-help.sh`
-  所有帮助文案
-- `30-args.sh`
-  参数解析、addon 解析、默认值推导、动作门禁
-- `40-inputs-and-plan.sh`
-  输入校验、认证处理、执行计划、确认逻辑
-- `50-render-and-apply.sh`
-  镜像准备、模板渲染、资源 apply
-- `60-runtime.sh`
-  wait/job/log/report/mysql 等运行时公共逻辑
-- `70-lifecycle-actions.sh`
-  install / uninstall / status / addon 相关动作
-- `80-data-actions.sh`
-  backup / restore / verify-backup-restore
-- `90-benchmark-and-main.sh`
-  benchmark、收尾输出、cleanup、main
-
-### 2.2 哪些文件应该改
-
-应该改：
-
-- `scripts/install/modules/*.sh`
-- `manifests/*.yaml`
-- `images/image.json`
-- `build.sh`
-- 各类文档
-
-不应该作为长期源码入口直接改：
-
-- 根目录 `install.sh`
+- 日常修改优先改 `scripts/install/modules/*.sh`
+- 再执行 `scripts/assemble-install.sh install.sh` 重新生成根目录 `install.sh`
+- 根目录 `install.sh` 是最终产物和调试入口，不是长期手工维护的主源码文件
 
 ---
 
-## 3. 构建方式
+## 3. 能力边界
 
-### 3.1 本地构建
+### 3.1 integrated 包
 
-```bash
-chmod +x build.sh install.sh scripts/assemble-install.sh
-./build.sh --arch amd64
-./build.sh --arch arm64
-./build.sh --arch all
-```
+适合：
 
-构建时会自动执行：
+- 首次离线交付 MySQL
+- 整套对齐 StatefulSet / Service / PVC / sidecar
+- 一次性开启监控、备份、压测等能力
 
-1. 从 `scripts/install/modules/*.sh` 组装出根目录 `install.sh`
-2. 根据 `images/image.json` 拉取并打包离线镜像
-3. 把 `install.sh` 与 payload 拼成 `.run` 文件
+支持动作：
 
-产物：
-
-```text
-dist/mysql-installer-amd64.run
-dist/mysql-installer-amd64.run.sha256
-dist/mysql-installer-arm64.run
-dist/mysql-installer-arm64.run.sha256
-```
-
-### 3.2 GitHub Actions
-
-- push 到 `main`：触发构建
-- push `v*` tag：触发构建并发布 release
-
-### 3.3 推荐维护动作
-
-如果你修改了 installer 源码，推荐顺序是：
-
-```bash
-bash scripts/assemble-install.sh install.sh
-bash -n install.sh
-bash -n build.sh
-bash -n scripts/assemble-install.sh
-```
-
----
-
-## 4. 命令模型
-
-### 4.1 install
-
-用于全量安装或重新对齐 MySQL 资源。
-
-适合场景：
-
-1. 首次安装
-2. 调整副本数、存储、NodePort、功能开关
-3. 重新对齐 StatefulSet 与相关资源
-4. 可以接受必要时的滚动更新
-
-### 4.2 addon-install
-
-用于给“已经存在的 MySQL”补装外置能力。
-
-当前支持：
-
-- `monitoring`
-- `service-monitor`
+- `install`
+- `uninstall`
+- `status`
+- `addon-install`
+- `addon-uninstall`
+- `addon-status`
 - `backup`
+- `restore`
+- `verify-backup-restore`
+- `benchmark`
 
-原则：
+### 3.2 backup-restore 包
 
-1. 尽量新增外围资源
-2. 尽量不重写 MySQL StatefulSet
-3. 尽量不影响正在运行的 MySQL Pod
+适合：
 
-### 4.3 addon-uninstall
+- 已有 MySQL，只需要备份恢复能力
+- 想做多中心定时备份
+- 想执行恢复或闭环校验
 
-用于移除外置 addon 资源。
+支持动作：
 
-### 4.4 backup
+- `status`
+- `addon-install --addons backup`
+- `addon-uninstall --addons backup`
+- `addon-status`
+- `backup`
+- `restore`
+- `verify-backup-restore`
 
-立即执行一次备份 Job。
+### 3.3 benchmark 包
 
-注意：
+适合：
 
-1. 这不是安装定时备份
-2. 不会创建 CronJob
-3. 只会创建一次性 Job
+- 只想做标准化 MySQL 压测
+- 不想携带备份、监控、安装逻辑
 
-### 4.5 restore
+支持动作：
 
-基于快照执行恢复。
+- `benchmark`
 
-注意：
+### 3.4 monitoring 包
 
-1. `--restore-snapshot latest` 会优先读取 `latest.txt`
-2. 如果 `latest.txt` 指向的快照已不存在，会自动回退到最新 `.sql.gz`
+适合：
 
-### 4.6 verify-backup-restore
+- 已有 MySQL，只想补 exporter / ServiceMonitor
 
-执行一次备份恢复闭环校验。
+支持动作：
 
-### 4.7 benchmark
-
-执行一次工程化 benchmark Job，并输出：
-
-1. 完整日志 `.log`
-2. 文本报告 `.txt`
-3. JSON 报告 `.json`
+- `status`
+- `addon-install --addons monitoring,service-monitor`
+- `addon-uninstall --addons monitoring,service-monitor`
+- `addon-status`
 
 ---
 
-## 5. 关键参数
+## 4. 备份计划模型
 
-### 5.1 基础参数
+### 4.1 旧参数继续兼容
 
-- `-n, --namespace`
-- `--root-password`
-- `--auth-secret`
-- `--mysql-replicas`
-- `--storage-class`
-- `--storage-size`
-- `--service-name`
-- `--sts-name`
-- `--wait-timeout`
-- `-y, --yes`
+以下顶层参数仍然可用，并会生成默认主计划：
 
-### 5.2 NodePort 参数
-
-- `--nodeport-enabled true|false`
-- `--enable-nodeport`
-- `--disable-nodeport`
-- `--node-port`
-- `--nodeport-service-name`
-
-### 5.3 镜像参数
-
-- `--registry <repo-prefix>`
-- `--skip-image-prepare`
-
-### 5.4 MySQL 目标连接参数
-
-- `--mysql-host`
-- `--mysql-port`
-- `--mysql-user`
-- `--mysql-password`
-- `--mysql-auth-secret`
-- `--mysql-password-key`
-- `--mysql-target-name`
-
-### 5.5 备份参数
-
-- `--backup-backend nfs|s3`
-- `--backup-root-dir`
+- `--backup-backend`
 - `--backup-nfs-server`
 - `--backup-nfs-path`
+- `--backup-root-dir`
 - `--backup-schedule`
 - `--backup-retention`
 - `--s3-endpoint`
@@ -283,312 +167,201 @@ bash -n scripts/assemble-install.sh
 - `--s3-prefix`
 - `--s3-access-key`
 - `--s3-secret-key`
-- `--s3-insecure`
+- `--backup-store-name`
+- `--backup-databases`
+- `--backup-tables`
 
-### 5.6 benchmark 参数
+### 4.2 额外增加计划
 
-- `--benchmark-profile`
-- `--benchmark-threads`
-- `--benchmark-time`
-- `--benchmark-warmup-time`
-- `--benchmark-warmup-rows`
-- `--benchmark-tables`
-- `--benchmark-table-size`
-- `--benchmark-db`
-- `--benchmark-rand-type`
-- `--benchmark-keep-data`
-- `--report-dir`
-
----
-
-## 6. 关键行为与边界
-
-### 6.1 backup / restore / verify-backup-restore 认证要求
-
-对以下动作：
-
-- `backup`
-- `restore`
-- `verify-backup-restore`
-- `addon-install --addons backup`
-
-现在要求显式提供可用的 MySQL 认证信息：
-
-1. 直接传 `--mysql-password`
-2. 或提供已存在的 `--mysql-auth-secret`
-
-不再默认回退到 `--root-password`。
-
-这是为了避免：
-
-1. 目标 Secret 不存在时误创建错误 Secret
-2. 把安装本体密码和运行期连接密码混为一谈
-
-### 6.2 NodePort 开关
-
-新增：
-
-- `--nodeport-enabled`
-- `--enable-nodeport`
-- `--disable-nodeport`
-
-NodePort Service 不再强制创建。
-
-### 6.3 镜像前缀可配置
-
-新增：
-
-- `--registry <repo-prefix>`
-
-用于把离线镜像重打标签到指定仓库前缀。
-
-### 6.4 benchmark 镜像策略
-
-benchmark 不再通过仓库内 Dockerfile 自建 sysbench 镜像。
-
-现在直接使用官方镜像：
-
-- `openeuler/sysbench:1.0.20-oe2403sp1`
-
-这样构建链路更短，复现性更高。
-
----
-
-## 7. 当前默认值
-
-- namespace: `aict`
-- replicas: `1`
-- storageClass: `nfs`
-- storage size: `10Gi`
-- service name: `mysql`
-- sts name: `mysql`
-- nodePort service name: `mysql-nodeport`
-- nodePort: `30306`
-- nodePort enabled: `true`
-- backup backend: `nfs`
-- backup nfs path: `/data/nfs-share`
-- backup root dir: `backups`
-- backup retention: `5`
-- report dir: `./reports`
-- benchmark profile: `standard`
-- benchmark threads: `32`
-- benchmark time: `180`
-- benchmark warmup time: `30`
-- benchmark warmup rows: `10000`
-- benchmark tables: `8`
-- benchmark table size: `100000`
-
-默认开启：
-
-- monitoring
-- service-monitor
-- fluentbit
-- backup
-- benchmark
-
----
-
-## 8. 常用示例
-
-### 8.1 首次安装，启用 NFS 备份
+通过重复传入 `--backup-plan '<spec>'` 增加多个中心：
 
 ```bash
-./dist/mysql-installer-amd64.run install \
-  --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --backup-backend nfs \
-  --backup-nfs-server 192.168.10.2 \
-  --backup-nfs-path /data/nfs-share \
-  -y
-```
-
-### 8.2 首次安装，但关闭 NodePort 和备份
-
-```bash
-./dist/mysql-installer-amd64.run install \
-  --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --disable-nodeport \
-  --disable-backup \
-  -y
-```
-
-### 8.3 指定镜像前缀安装
-
-```bash
-./dist/mysql-installer-amd64.run install \
-  --namespace mysql-demo \
-  --root-password 'StrongPassw0rd' \
-  --registry harbor.example.com/kube4 \
-  -y
-```
-
-### 8.4 给已有 MySQL 补监控
-
-```bash
-./dist/mysql-installer-amd64.run addon-install \
-  --namespace mysql-demo \
-  --addons monitoring,service-monitor \
-  -y
-```
-
-### 8.5 给已有 MySQL 补定时备份
-
-```bash
-./dist/mysql-installer-amd64.run addon-install \
+./dist/mysql-backup-restore-amd64.run addon-install \
   --namespace mysql-demo \
   --addons backup \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+  --mysql-host 10.0.0.20 \
   --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
-  --mysql-target-name mysql-demo \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \
+  --backup-plan 'name=nfs-b;backend=nfs;nfsServer=192.168.20.2;nfsPath=/data/nfs-b;schedule=10 2 * * *;retention=7;databases=orders,inventory' \
+  --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=20 2 * * *;retention=30;tables=orders.audit_log,orders.audit_event' \
+  -y
+```
+
+支持字段：
+
+- `name`
+- `storeName`
+- `backend`
+- `rootDir`
+- `schedule`
+- `retention`
+- `nfsServer`
+- `nfsPath`
+- `s3Endpoint`
+- `s3Bucket`
+- `s3Prefix`
+- `s3AccessKey`
+- `s3SecretKey`
+- `s3Insecure`
+- `databases`
+- `tables`
+
+### 4.3 导出范围
+
+支持三种范围：
+
+- 全量：不传 `databases` / `tables`
+- 指定库：`databases=db1,db2`
+- 指定表：`tables=db1.t1,db2.t2`
+
+说明：
+
+- 指定表时会自动按库分组导出
+- restore 导入的就是该 dump 中包含的对象
+- 对部分库/表备份，推荐使用 `--restore-mode merge`
+- `wipe-all-user-databases` 只允许全量备份来源，避免误删其他业务库
+
+### 4.4 路径规则
+
+NFS：
+
+```text
+<backup-nfs-path>/<backup-root-dir>/mysql/<namespace>/<mysql-target-name>/stores/<store-name>/
+```
+
+S3 / MinIO：
+
+```text
+<bucket>/<s3-prefix>/<backup-root-dir>/mysql/<namespace>/<mysql-target-name>/stores/<store-name>/
+```
+
+如果 `store-name` 是默认主存储 `primary`，则继续兼容原有路径，不强制插入 `stores/primary`。
+
+---
+
+## 5. 常用命令
+
+### 5.1 首次安装并带默认 NFS 备份
+
+```bash
+./dist/mysql-installer-amd64.run install \
+  --namespace mysql-demo \
+  --root-password 'StrongPassw0rd' \
   --backup-backend nfs \
   --backup-nfs-server 192.168.10.2 \
   --backup-nfs-path /data/nfs-share \
   -y
 ```
 
-### 8.6 立即执行一次备份
+### 5.2 给已有 MySQL 增加多中心定时备份
 
 ```bash
-./dist/mysql-installer-amd64.run backup \
+./dist/mysql-backup-restore-amd64.run addon-install \
   --namespace mysql-demo \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+  --addons backup \
+  --mysql-host 10.0.0.20 \
   --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
-  --mysql-target-name mysql-demo \
-  --backup-backend nfs \
-  --backup-nfs-server 192.168.10.2 \
-  --backup-nfs-path /data/nfs-share \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=dc1-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \
+  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=30;tables=orders.audit_log,orders.audit_event' \
   -y
 ```
 
-### 8.7 从 latest 恢复
+### 5.3 立刻执行一次多中心备份
 
 ```bash
-./dist/mysql-installer-amd64.run restore \
+./dist/mysql-backup-restore-amd64.run backup \
   --namespace mysql-demo \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+  --mysql-host 10.0.0.20 \
   --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
-  --mysql-target-name mysql-demo \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --disable-default-backup-plan \
+  --backup-plan 'name=dc1-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;databases=orders,inventory;retention=7' \
+  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;databases=orders,inventory;retention=30' \
+  -y
+```
+
+### 5.4 从指定中心恢复
+
+```bash
+./dist/mysql-backup-restore-amd64.run restore \
+  --namespace mysql-demo \
+  --mysql-host 10.0.0.20 \
+  --mysql-user root \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --restore-source dc2-minio \
   --restore-snapshot latest \
-  --mysql-restore-mode merge \
-  --backup-backend nfs \
-  --backup-nfs-server 192.168.10.2 \
-  --backup-nfs-path /data/nfs-share \
+  --restore-mode merge \
+  --disable-default-backup-plan \
+  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \
   -y
 ```
 
-### 8.8 运行 benchmark
+### 5.5 独立压测
 
 ```bash
-./dist/mysql-installer-amd64.run benchmark \
+./dist/mysql-benchmark-amd64.run benchmark \
   --namespace mysql-demo \
-  --mysql-host mysql-0.mysql.mysql-demo.svc.cluster.local \
+  --mysql-host 10.0.0.20 \
   --mysql-user root \
-  --mysql-password 'StrongPassw0rd' \
+  --mysql-password '<MYSQL_PASSWORD>' \
   --benchmark-profile oltp-read-write \
   --benchmark-threads 64 \
   --benchmark-time 300 \
-  --benchmark-warmup-time 30 \
-  --benchmark-warmup-rows 10000 \
-  --benchmark-table-size 300000 \
   --report-dir ./reports \
   -y
 ```
 
 ---
 
-## 9. 按 README 做验证
+## 6. 构建方式
 
-### 9.1 构建验证
-
-检查 GitHub Actions 或 release 产物是否存在：
-
-- `mysql-installer-amd64.run`
-- `mysql-installer-amd64.run.sha256`
-- `mysql-installer-arm64.run`
-- `mysql-installer-arm64.run.sha256`
-
-### 9.2 安装验证
+### 6.1 本地构建
 
 ```bash
-kubectl get pods -n <ns>
-kubectl get sts -n <ns>
-kubectl get svc -n <ns>
-kubectl get pvc -n <ns>
+chmod +x build.sh install.sh scripts/assemble-install.sh
+./build.sh --arch amd64 --profile integrated
+./build.sh --arch amd64 --profile backup-restore
+./build.sh --arch amd64 --profile benchmark
+./build.sh --arch amd64 --profile monitoring
+./build.sh --arch all --profile all
 ```
 
-如果开启 NodePort，再检查：
+### 6.2 GitHub Actions
 
-```bash
-kubectl get svc -n <ns> <nodeport-service-name> -o yaml
-```
+当前 workflow 会按矩阵构建：
 
-### 9.3 addon 验证
+- `amd64`
+- `arm64`
+- `integrated`
+- `backup-restore`
+- `benchmark`
+- `monitoring`
 
-监控 addon：
-
-```bash
-kubectl get deploy -n <ns> mysql-exporter
-kubectl get svc -n <ns> mysql-exporter
-kubectl get servicemonitor -n <ns>
-```
-
-备份 addon：
-
-```bash
-kubectl get cronjob -n <ns>
-kubectl get configmap -n <ns> mysql-backup-scripts
-kubectl get secret -n <ns>
-```
-
-### 9.4 backup / restore 验证
-
-```bash
-kubectl get jobs -n <ns>
-kubectl logs -n <ns> job/<job-name>
-```
-
-如果 `latest.txt` 指向旧文件，可以删掉对应快照后再次执行：
-
-```bash
-./dist/mysql-installer-amd64.run restore ... --restore-snapshot latest
-```
-
-确认它会自动回退到当前最新 `.sql.gz`。
-
-### 9.5 benchmark 验证
-
-```bash
-kubectl get jobs -n <ns>
-kubectl logs -n <ns> job/<benchmark-job-name>
-ls -l ./reports
-```
-
-应看到：
-
-- `*.log`
-- `*.txt`
-- `*.json`
+因此一次 workflow 会产出 8 份 `.run` 与对应的 `.sha256`。
 
 ---
 
-## 10. 维护约定
+## 7. 当前验证重点
 
-1. 日常维护只改 `scripts/install/modules/*.sh`
-2. 不直接把根目录 `install.sh` 当主源码编辑
-3. 修改后执行 `scripts/assemble-install.sh install.sh`
-4. 如果改动影响用户行为，同步更新 `README`、`docs/ARCHITECTURE.zh-CN.md`、`docs/ADDONS.zh-CN.md`、`docs/USE-CASES.zh-CN.md`
-5. 只有在职责边界明显扩张时才新增模块，不回退到“一个函数一个文件”
+本轮重点验证以下能力：
+
+- 多个 `--backup-plan` 生成多条 CronJob / 多个目的地
+- `--backup-databases` / `--backup-tables` 的导出范围
+- restore 的 `--restore-source` 选择逻辑
+- 部分备份与 `wipe-all-user-databases` 的安全边界
+- 多产物构建链路与 GitHub Actions 矩阵产物
+- benchmark 在旧版 sysbench 下的兼容逻辑
 
 ---
 
-## 11. 相关文档
+## 8. 相关文档
 
 - [架构说明](docs/ARCHITECTURE.zh-CN.md)
-- [Addon 说明](docs/ADDONS.zh-CN.md)
 - [使用场景](docs/USE-CASES.zh-CN.md)
+- [Addon 说明](docs/ADDONS.zh-CN.md)
 - [测试说明](docs/TESTING.zh-CN.md)
-- [2026-04-06 installer 源码组织 ADR](docs/plans/2026-04-06-installer-source-layout-adr.md)
+- [2026-04-07 多中心备份与多产物方案](docs/plans/2026-04-07-mysql-capability-packaging-and-multi-center-backup.md)

@@ -180,6 +180,10 @@ parse_args() {
         BACKUP_BACKEND="$2"
         shift 2
         ;;
+      --backup-store-name)
+        BACKUP_STORE_NAME="$2"
+        shift 2
+        ;;
       --backup-nfs-server)
         BACKUP_NFS_SERVER="$2"
         shift 2
@@ -199,6 +203,22 @@ parse_args() {
       --backup-retention)
         BACKUP_RETENTION="$2"
         shift 2
+        ;;
+      --backup-databases)
+        BACKUP_DATABASES="$2"
+        shift 2
+        ;;
+      --backup-tables)
+        BACKUP_TABLES="$2"
+        shift 2
+        ;;
+      --backup-plan)
+        BACKUP_PLAN_EXTRA_SPECS+=("$2")
+        shift 2
+        ;;
+      --disable-default-backup-plan)
+        BACKUP_DEFAULT_PLAN_ENABLED="false"
+        shift
         ;;
       --s3-endpoint)
         S3_ENDPOINT="$2"
@@ -243,6 +263,10 @@ parse_args() {
         ;;
       --restore-mode)
         MYSQL_RESTORE_MODE="$2"
+        shift 2
+        ;;
+      --restore-source)
+        BACKUP_RESTORE_SOURCE="$2"
         shift 2
         ;;
       --wait-timeout)
@@ -529,10 +553,18 @@ resolve_feature_dependencies() {
 
 
 validate_action_feature_gates() {
+  package_profile_supports_action "${ACTION}" || die "当前产物包(${PACKAGE_PROFILE})不支持动作 ${ACTION}，可用动作: $(package_profile_supported_actions_text)"
+
   case "${ACTION}" in
     addon-install|addon-uninstall)
       [[ -n "${ADDONS}" ]] || die "动作 ${ACTION} 需要提供 --addons"
+      local addon_name
+      IFS=',' read -r -a requested_addons <<< "${ADDONS}"
+      for addon_name in "${requested_addons[@]}"; do
+        addon_name="$(trim_string "${addon_name}")"
+        [[ -n "${addon_name}" ]] || continue
+        package_profile_supports_addon "${addon_name}" || die "当前产物包(${PACKAGE_PROFILE})不支持 addon ${addon_name}"
+      done
       ;;
   esac
 }
-

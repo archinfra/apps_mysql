@@ -35,11 +35,13 @@ show_addon_status() {
   local embedded_logging="未安装"
   local addon_service_monitor="未安装"
   local embedded_service_monitor="未安装"
+  local backup_selector
 
   require_namespace_exists
 
   resource_exists deployment "${ADDON_EXPORTER_DEPLOYMENT_NAME}" && external_monitoring="已安装"
-  resource_exists cronjob "${BACKUP_CRONJOB_NAME}" && backup_addon="已安装"
+  backup_selector="$(backup_resource_selector)"
+  kubectl get cronjob -n "${NAMESPACE}" -l "${backup_selector}" -o name 2>/dev/null | grep -q . && backup_addon="已安装"
 
   if resource_exists statefulset "${STS_NAME}"; then
     statefulset_has_container "mysqld-exporter" && embedded_monitoring="已安装"
@@ -140,8 +142,8 @@ install_app() {
   section "安装 / 对齐 MySQL"
   apply_mysql_manifests
   if [[ "${BACKUP_ENABLED}" == "true" ]]; then
-    apply_backup_support_manifests
-    apply_backup_schedule_manifests
+    apply_backup_support_manifests_for_all_plans
+    apply_backup_schedule_manifests_for_all_plans
   else
     warn "当前关闭了备份组件，将清理 backup CronJob 及支持资源"
   fi
@@ -192,12 +194,11 @@ install_addons() {
       die "为已有外部 MySQL 安装 backup addon 时，请显式提供 --mysql-host"
     fi
 
-    apply_backup_support_manifests
+    apply_backup_support_manifests_for_all_plans
     preflight_mysql_connection "预检 backup addon 目标连接"
 
     section "安装 backup addon"
-    apply_backup_schedule_manifests
+    apply_backup_schedule_manifests_for_all_plans
     success "backup addon 安装完成"
   fi
 }
-

@@ -8,6 +8,7 @@ set -Eeuo pipefail
 
 APP_NAME="mysql"
 APP_VERSION="1.5.3"
+PACKAGE_PROFILE="${PACKAGE_PROFILE:-integrated}"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
 MANIFEST_DIR="${WORKDIR}/manifests"
@@ -65,6 +66,12 @@ BACKUP_SCRIPT_CONFIGMAP="mysql-backup-scripts"
 BACKUP_CRONJOB_NAME="mysql-backup"
 BACKUP_STORAGE_SECRET="mysql-backup-storage"
 BACKUP_BACKEND="nfs"
+BACKUP_PLAN_NAME="primary"
+BACKUP_STORE_NAME="primary"
+BACKUP_DATABASES=""
+BACKUP_TABLES=""
+BACKUP_RESTORE_SOURCE="auto"
+BACKUP_DEFAULT_PLAN_ENABLED="true"
 NODEPORT_SERVICE_NAME="mysql-nodeport"
 NODE_PORT="30306"
 NODEPORT_ENABLED="true"
@@ -123,6 +130,11 @@ BENCHMARK_HOST=""
 BENCHMARK_PORT="3306"
 BENCHMARK_USER="root"
 
+declare -a BACKUP_PLAN_EXTRA_SPECS=()
+declare -a BACKUP_PLAN_CATALOG=()
+declare -a BACKUP_PLAN_NAMES=()
+BACKUP_PLAN_DEFAULTS_CAPTURED="false"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -164,6 +176,7 @@ banner() {
   echo
   echo -e "${GREEN}${BOLD}MySQL 离线安装器${NC}"
   echo -e "${CYAN}版本: ${APP_VERSION}${NC}"
+  echo -e "${CYAN}产物包: $(package_profile_label)${NC}"
 }
 
 
@@ -177,24 +190,38 @@ backup_backend_is_s3() {
 }
 
 
+program_name() {
+  basename "$0"
+}
+
 
 show_help_overview() {
-  cat <<'EOF'
-用法:
-  ./mysql-installer.run <动作> [参数]
-  ./mysql-installer.run help [主题]
+  local cmd="./$(program_name)"
+  local supported_actions
+  supported_actions="$(package_profile_supported_actions_text)"
 
-动作:
-  install                 安装或整套对齐 MySQL 及内嵌能力
-  uninstall               卸载资源，默认保留 PVC
+  cat <<EOF
+用法:
+  ${cmd} <动作> [参数]
+  ${cmd} help [主题]
+
+当前产物包:
+  $(package_profile_label)
+
+当前包可用动作:
+  ${supported_actions}
+
+动作说明:
+  install                 整体安装或对齐 MySQL 本体与内置能力
+  uninstall               卸载集成包创建的资源，默认保留 PVC
   status                  查看当前资源状态
-  addon-install           给已有 MySQL 单独补齐外置能力
-  addon-uninstall         单独移除外置能力
+  addon-install           给已有 MySQL 补充外围能力
+  addon-uninstall         单独移除外围能力
   addon-status            查看 addon 状态与影响边界
   backup                  立即执行一次备份 Job
   restore                 立即执行一次恢复 Job
   verify-backup-restore   执行备份/恢复闭环校验
-  benchmark               执行工程化压测
+  benchmark               执行压测 Job 并输出报告
   help                    查看中文帮助
 
 help 主题:
@@ -206,25 +233,28 @@ help 主题:
   benchmark
   params
   backup-restore
+  packages
   logging
   architecture
   examples
 
 关键设计:
-  1. install 是“整套声明式对齐”，不是一次性初始化脚本。
-  2. addon-install 面向“已有 MySQL 补能力”，尽量只新增资源，不改 MySQL StatefulSet。
-  3. backup 是“立刻备份一次”，addon-install --addons backup 才是“安装定时备份组件”。
-  4. 日志默认推荐平台层 DaemonSet Fluent Bit + ES/OpenSearch/Loki。
+  1. 这套工具已经拆成“集成包 + 能力包”，不是只有一个大一统 installer。
+  2. backup 既支持默认主计划，也支持通过重复 --backup-plan 增加多个中心、多种存储、多条定时策略。
+  3. 备份范围可以是全量、指定库，或指定表；restore 会按备份内容回放。
+  4. backup 是“立刻执行一次”，addon-install --addons backup 才是“安装定时备份计划”。
 EOF
 }
 
 
 show_help_install() {
-  cat <<'EOF'
-install 适合:
+  local cmd="./mysql-installer-<arch>.run"
+
+  cat <<EOF
+install 仅在 integrated 包中可用，适合:
   1. 首次安装 MySQL
   2. 调整副本数、存储、Service 等配置后重新对齐
-  3. 启用或关闭监控、日志、备份、压测等能力
+  3. 一次性开启或关闭监控、日志、备份、压测等能力
 
 常用参数:
   -n, --namespace <ns>              默认: aict
@@ -235,37 +265,40 @@ install 适合:
   --storage-size <size>             默认: 10Gi
   --service-name <name>             默认: mysql
   --sts-name <name>                 默认: mysql
-  --nodeport-service-name <name>    默认: mysql-nodeport
-  --node-port <port>                默认: 30306
   --nodeport-enabled true|false     默认: true
   --enable-nodeport / --disable-nodeport
   --registry <repo-prefix>          例如: harbor.example.com/kube4
-  --mysql-slow-query-time <sec>     默认: 2
   --wait-timeout <duration>         默认: 10m
 
-备份相关:
-  --backup-backend nfs|s3           默认: nfs
-  --backup-root-dir <dir>           默认: backups
-  --backup-nfs-server <addr>
-  --backup-nfs-path <path>          默认: /data/nfs-share
-
-功能开关:
-  默认启用 monitoring / service-monitor / fluentbit / backup / benchmark
-  --enable-monitoring / --disable-monitoring
-  --enable-service-monitor / --disable-service-monitor
-  --enable-fluentbit / --disable-fluentbit
+备份能力:
   --enable-backup / --disable-backup
-  --enable-benchmark / --disable-benchmark
+  --backup-backend nfs|s3           默认主计划后端
+  --backup-store-name <name>        默认主计划存储名，默认: primary
+  --backup-plan '<spec>'            追加一个额外备份计划，可重复传入
+  --disable-default-backup-plan     仅保留显式定义的 backup plan
 
 说明:
-  1. install 会对 StatefulSet 及相关资源做声明式对齐
-  2. 如果 MySQL 配置或 sidecar 发生变化，可能触发滚动更新
-  3. 如果只是补装备份或外置监控，优先使用 addon-install
+  1. install 会对 StatefulSet 与相关资源做声明式对齐，配置变化可能触发滚动更新。
+  2. 如果只是给已有 MySQL 补监控或备份，优先使用 addon-install。
+  3. 多中心备份推荐用一个主计划 + 多个 --backup-plan，或直接关闭默认计划后全部显式定义。
+
+示例:
+  ${cmd} install \\
+    --namespace mysql-demo \\
+    --root-password 'StrongPassw0rd' \\
+    --backup-backend nfs \\
+    --backup-nfs-server 192.168.10.2 \\
+    --backup-nfs-path /data/nfs-a \\
+    --backup-plan 'name=dc2-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=0 3 * * *;retention=7' \\
+    -y
 EOF
 }
 
+
 show_help_addons() {
-  cat <<'EOF'
+  local cmd="./mysql-backup-restore-<arch>.run"
+
+  cat <<EOF
 addon-install / addon-uninstall / addon-status 面向“已有 MySQL 补能力”。
 
 支持的 addon:
@@ -274,12 +307,12 @@ addon-install / addon-uninstall / addon-status 面向“已有 MySQL 补能力�
     默认新增独立 Pod，不修改 MySQL StatefulSet
 
   service-monitor
-    仅创建 ServiceMonitor 声明
+    创建 ServiceMonitor 声明
     自动依赖 monitoring
 
   backup
-    安装备份支持资源 + CronJob
-    不会重启 MySQL Pod
+    安装备份脚本、Secret 与一个或多个 CronJob
+    支持多计划、多中心、按库/表范围导出
 
 addon 参数:
   --addons <list>                   必填，逗号分隔: monitoring,service-monitor,backup
@@ -295,16 +328,25 @@ addon 参数:
   或:
   --mysql-auth-secret <name> --mysql-password-key <key>
 
-日志决策:
-  1. 已有平台级日志体系时，不建议给 MySQL 叠加 sidecar。
-  2. addon 路径不提供 logging addon，因为它会改 StatefulSet。
-  3. 必须采 slow log 文件时，再使用 install --enable-fluentbit。
+示例:
+  ${cmd} addon-install \\
+    --namespace mysql-demo \\
+    --addons backup \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --disable-default-backup-plan \\
+    --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7' \\
+    --backup-plan 'name=minio-b;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=7' \\
+    -y
 EOF
 }
 
 
 show_help_backup() {
-  cat <<'EOF'
+  local cmd="./mysql-backup-restore-<arch>.run"
+
+  cat <<EOF
 请区分两个动作:
 
 场景 A: 安装备份组件
@@ -316,7 +358,7 @@ show_help_backup() {
 
 区别:
   1. 场景 A 会安装 ConfigMap / Secret / CronJob 等资源
-  2. 场景 B 只会创建一次性 Job，不会安装定时 CronJob
+  2. 场景 B 只会创建一次性 Job，不会安装 CronJob
 
 目标连接参数:
   --mysql-host <host>               默认推导为 <sts>-0.<svc>.<ns>.svc.cluster.local
@@ -327,29 +369,49 @@ show_help_backup() {
   --mysql-password-key <key>        Secret 中密码键名
   --mysql-target-name <name>        备份目录中的逻辑实例名
 
-认证要求:
-  1. backup / restore / verify-backup-restore 不再回退到 --root-password
-  2. 这类动作请显式提供 --mysql-password，或提供可用的 --mysql-auth-secret
-
-NFS 参数:
-  --backup-backend nfs
-  --backup-nfs-server <addr>
-  --backup-nfs-path <path>          默认: /data/nfs-share
+计划参数:
+  --backup-backend nfs|s3           默认主计划后端
+  --backup-store-name <name>        默认主计划存储名
   --backup-root-dir <dir>           默认: backups
+  --backup-schedule <cron>          默认主计划定时
   --backup-retention <num>          默认: 5
+  --backup-databases <db1,db2>      只导出指定库
+  --backup-tables <db.tbl,...>      只导出指定表
+  --backup-plan '<spec>'            增加额外计划，可重复传入
+  --disable-default-backup-plan     不再使用顶层主计划
 
-S3 参数:
-  --backup-backend s3
-  --s3-endpoint <url>
-  --s3-bucket <name>
-  --s3-prefix <dir>
-  --s3-access-key <key>
-  --s3-secret-key <key>
+NFS 计划字段:
+  name=<plan-name>;backend=nfs;nfsServer=<addr>;nfsPath=<path>;schedule=<cron>;retention=<num>;storeName=<name>
+
+S3 计划字段:
+  name=<plan-name>;backend=s3;s3Endpoint=<url>;s3Bucket=<bucket>;s3Prefix=<prefix>;s3AccessKey=<key>;s3SecretKey=<key>;schedule=<cron>;retention=<num>;storeName=<name>
+
+范围字段:
+  databases=db1,db2
+  tables=db1.t1,db2.t2
+
+认证要求:
+  1. backup / restore / verify-backup-restore 不再回退到 --root-password。
+  2. 请显式提供 --mysql-password，或提供可用的 --mysql-auth-secret。
+
+示例:
+  ${cmd} backup \\
+    --namespace mysql-demo \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --disable-default-backup-plan \\
+    --backup-plan 'name=orders-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;databases=orders,inventory;retention=7' \\
+    --backup-plan 'name=orders-audit;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \\
+    -y
 EOF
 }
 
+
 show_help_restore() {
-  cat <<'EOF'
+  local cmd="./mysql-backup-restore-<arch>.run"
+
+  cat <<EOF
 restore 用于从备份快照恢复 MySQL。
 
 常用参数:
@@ -361,17 +423,35 @@ restore 用于从备份快照恢复 MySQL。
   --mysql-password-key <key>        Secret 中密码键名
   --mysql-target-name <name>        备份目录中的逻辑实例名
   --restore-snapshot <name|latest>  默认: latest
-  --mysql-restore-mode merge|replace 默认: merge
+  --restore-source <plan-name|auto> 默认: auto，按 backup plan 顺序尝试
+  --restore-mode merge|wipe-all-user-databases 默认: merge
 
 说明:
-  1. latest 会优先读取 latest.txt
-  2. 如果 latest.txt 指向的快照已不存在，会自动回退到最新的 .sql.gz
-  3. restore 会直接向目标实例导入 SQL，请在维护窗口执行
+  1. latest 会优先读取 latest.txt。
+  2. 如果 latest.txt 指向的快照不存在，会自动回退到目录里最新的 .sql.gz。
+  3. 当 restore-source 是“部分库/表备份”时，建议使用 merge。
+  4. wipe-all-user-databases 只允许全量备份来源，避免误删其他业务库。
+
+示例:
+  ${cmd} restore \\
+    --namespace mysql-demo \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --restore-source dc2-s3 \\
+    --restore-snapshot latest \\
+    --restore-mode merge \\
+    --disable-default-backup-plan \\
+    --backup-plan 'name=dc2-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \\
+    -y
 EOF
 }
 
+
 show_help_benchmark() {
-  cat <<'EOF'
+  local cmd="./mysql-benchmark-<arch>.run"
+
+  cat <<EOF
 benchmark 会创建一次性 Job，对目标 MySQL 执行 sysbench 压测。
 
 常用参数:
@@ -392,15 +472,29 @@ benchmark 会创建一次性 Job，对目标 MySQL 执行 sysbench 压测。
   --report-dir <dir>                     默认: ./reports
 
 输出:
-  1. 保留完整 job 日志
-  2. 生成文本报告 .txt
-  3. 生成结构化报告 .json，便于后续分析
+  1. 完整 job 日志 .log
+  2. 文本报告 .txt
+  3. 结构化报告 .json
 
 说明:
-  1. warmup rows 与正式 table size 已解耦
-  2. MySQL 8 会自动附加更宽松的兼容参数
+  1. benchmark 能单独打包成 mysql-benchmark-<arch>.run。
+  2. 当前会自动兼容不支持 --warmup-time 的 sysbench 版本。
+
+示例:
+  ${cmd} benchmark \\
+    --namespace mysql-demo \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --benchmark-profile oltp-read-write \\
+    --benchmark-threads 64 \\
+    --benchmark-time 300 \\
+    --benchmark-table-size 300000 \\
+    --report-dir ./reports \\
+    -y
 EOF
 }
+
 
 show_help_params() {
   cat <<'EOF'
@@ -433,19 +527,29 @@ MySQL 目标连接:
   --mysql-password-key <key>
   --mysql-target-name <name>
 
-备份存储:
+备份计划:
   --backup-backend nfs|s3
+  --backup-store-name <name>
   --backup-root-dir <dir>
   --backup-nfs-server <addr>
   --backup-nfs-path <path>
   --backup-schedule <cron>
   --backup-retention <num>
+  --backup-databases <db1,db2>
+  --backup-tables <db.tbl,...>
+  --backup-plan '<spec>'
+  --disable-default-backup-plan
+  --restore-source <plan-name|auto>
+  --restore-snapshot <name|latest>
+  --restore-mode merge|wipe-all-user-databases
+
+S3:
   --s3-endpoint <url>
   --s3-bucket <name>
   --s3-prefix <dir>
   --s3-access-key <key>
   --s3-secret-key <key>
-  --s3-insecure true|false
+  --s3-insecure
 
 压测:
   --benchmark-profile <name>
@@ -457,28 +561,70 @@ MySQL 目标连接:
   --benchmark-table-size <rows>
   --benchmark-db <name>
   --benchmark-rand-type <name>
-  --benchmark-keep-data true|false
+  --benchmark-keep-data
   --report-dir <dir>
 EOF
 }
+
 
 show_help_backup_restore() {
   cat <<'EOF'
 备份原理:
   1. 连接目标 MySQL 并探测可用性
-  2. 枚举用户库，排除系统库
-  3. 执行 mysqldump，生成 gzip、sha256 和 meta
-  4. 更新 latest.txt，并按 retention 清理旧快照
+  2. 按 scope 决定导出全库、指定库，或指定表
+  3. 生成 gzip、sha256、meta 与 latest.txt
+  4. 按 retention 清理旧快照
+
+多中心设计:
+  1. 一个 backup plan 对应一个存储目的地和一条调度策略
+  2. 可以有多个 NFS、多个 S3，也可以 NFS + S3 混搭
+  3. 默认计划继续兼容旧参数，额外中心通过重复 --backup-plan 叠加
+
+路径规则:
+  NFS:
+    <backup-nfs-path>/<backup-root-dir>/mysql/<namespace>/<mysql-target-name>/stores/<store-name>/
+  S3:
+    <bucket>/<s3-prefix>/<backup-root-dir>/mysql/<namespace>/<mysql-target-name>/stores/<store-name>/
 
 恢复原理:
-  1. 定位快照
-  2. 校验 sha256
-  3. 按 restore-mode 决定是否先清空用户库
+  1. 按 restore-source 或 auto 顺序选择备份来源
+  2. 定位快照并校验 sha256
+  3. 根据 restore-mode 决定是否先清空用户库
   4. gunzip 后通过 mysql 客户端导入
 
-业务影响:
+边界说明:
   1. backup 不要求停业务。
-  2. restore 不会主动停库，但会修改目标数据，建议维护窗口执行。
+  2. restore 会修改目标数据，建议维护窗口执行。
+  3. 对部分库/表备份，推荐 restore-mode=merge。
+  4. verify-backup-restore 只会拿“覆盖 offline_validation 校验表”的备份来源做恢复校验。
+EOF
+}
+
+
+show_help_packages() {
+  cat <<'EOF'
+当前会构建四类产物:
+
+  mysql-installer-<arch>.run
+    集成包
+    支持 install / uninstall / status / addon / backup / restore / benchmark
+
+  mysql-backup-restore-<arch>.run
+    备份恢复能力包
+    支持 status / addon-install backup / addon-uninstall backup / backup / restore / verify-backup-restore
+
+  mysql-benchmark-<arch>.run
+    压测能力包
+    只保留 benchmark 所需镜像、manifest 与动作
+
+  mysql-monitoring-<arch>.run
+    监控能力包
+    支持 monitoring / service-monitor 的 addon 安装与卸载
+
+设计目标:
+  1. 保留 integrated 包，继续服务离线整体交付
+  2. 抽出 backup-restore / benchmark / monitoring，降低非目标场景的使用成本
+  3. 让“只想压测”或“只想做备份恢复”的团队不必接受整个大包
 EOF
 }
 
@@ -499,21 +645,6 @@ show_help_logging() {
   1. 已建设平台日志体系时，不建议再做 MySQL sidecar。
   2. addon 路径不提供 logging addon。
   3. install --enable-fluentbit 仅保留给必须采容器内日志文件的场景。
-
-日志落点:
-  1. 默认模式下，研发优先看容器 stdout/stderr。
-  2. 启用 fluentbit sidecar 后，MySQL 会把 error log / slow log 写到 /var/log/mysql/*.log。
-  3. sidecar 负责 tail 这些文件并输出到自己的 stdout，便于被平台日志系统继续采走。
-
-研发快速排查:
-  1. 查看 MySQL 容器日志:
-     kubectl logs -n <ns> <pod> -c mysql --tail=200
-  2. 查看 sidecar 日志:
-     kubectl logs -n <ns> <pod> -c fluent-bit --tail=200
-  3. 直接进入 Pod 看日志文件:
-     kubectl exec -n <ns> <pod> -c mysql -- ls -l /var/log/mysql
-     kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/error.log
-     kubectl exec -n <ns> <pod> -c mysql -- tail -n 200 /var/log/mysql/slow.log
 EOF
 }
 
@@ -521,79 +652,92 @@ EOF
 show_help_architecture() {
   cat <<'EOF'
 能力分层:
-  install
-    负责 MySQL 本体、StatefulSet、Service、PVC，以及 sidecar 型能力
+  integrated
+    负责 MySQL 本体、StatefulSet、Service、PVC，以及整体安装体验
 
-  addon-install
-    负责已有 MySQL 的外置能力补齐，例如 exporter Deployment、ServiceMonitor、backup CronJob
+  backup-restore
+    负责备份计划、恢复、闭环校验、多中心副本
 
-为什么监控能做 addon，而日志默认不做:
-  1. exporter 可以外置成独立 Deployment。
-  2. slow log 文件采集通常需要 sidecar 进入同一个 Pod。
+  benchmark
+    负责压测能力与报告输出
+
+  monitoring
+    负责 exporter / ServiceMonitor 等外围监控能力
+
+源码结构:
+  scripts/install/modules/*.sh
+    职责模块源码入口
+
+  scripts/assemble-install.sh
+    组装 install.sh
+
+  build.sh
+    根据 --profile 与 --arch 产出不同离线包
 EOF
 }
 
 
 show_help_examples() {
-  cat <<'EOF'
+  cat <<EOF
 常见示例:
 
-首次安装:
-  ./mysql-installer.run install \
-    --namespace mysql-demo \
-    --root-password 'StrongPassw0rd' \
-    --storage-class nfs \
-    --storage-size 20Gi \
-    --backup-backend nfs \
-    --backup-nfs-server 192.168.10.2 \
-    --backup-nfs-path /data/nfs-share \
-    --backup-root-dir backups \
+首次安装并保留主备份计划:
+  ./mysql-installer-<arch>.run install \\
+    --namespace mysql-demo \\
+    --root-password 'StrongPassw0rd' \\
+    --backup-backend nfs \\
+    --backup-nfs-server 192.168.10.2 \\
+    --backup-nfs-path /data/nfs-a \\
+    --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=7' \\
     -y
 
-已有 MySQL 安装定时备份组件:
-  ./mysql-installer.run addon-install \
-    --namespace mysql-demo \
-    --addons backup \
-    --mysql-host 10.0.0.20 \
-    --mysql-port 3306 \
-    --mysql-user root \
-    --mysql-password '<MYSQL_PASSWORD>' \
-    --mysql-target-name mysql-prod \
-    --backup-backend nfs \
-    --backup-nfs-server 192.168.10.2 \
-    --backup-nfs-path /data/nfs-share \
-    --backup-root-dir backups \
-    --backup-schedule '0 2 * * *' \
+只给已有 MySQL 补多中心定时备份:
+  ./mysql-backup-restore-<arch>.run addon-install \\
+    --namespace mysql-demo \\
+    --addons backup \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --disable-default-backup-plan \\
+    --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \\
+    --backup-plan 'name=nfs-b;backend=nfs;nfsServer=192.168.20.2;nfsPath=/data/nfs-b;schedule=10 2 * * *;retention=7;databases=orders,inventory' \\
+    --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=20 2 * * *;retention=30;tables=orders.audit_log,orders.audit_event' \\
     -y
 
-立即执行一次备份:
-  ./mysql-installer.run backup \
-    --namespace mysql-demo \
-    --mysql-host 10.0.0.20 \
-    --mysql-port 3306 \
-    --mysql-user root \
-    --mysql-password '<MYSQL_PASSWORD>' \
-    --mysql-target-name mysql-prod \
-    --backup-backend nfs \
-    --backup-nfs-server 192.168.10.2 \
-    --backup-nfs-path /data/nfs-share \
-    --backup-root-dir backups \
+立刻导出指定表到多中心:
+  ./mysql-backup-restore-<arch>.run backup \\
+    --namespace mysql-demo \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --disable-default-backup-plan \\
+    --backup-plan 'name=audit-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;tables=orders.audit_log,orders.audit_event;retention=7' \\
+    --backup-plan 'name=audit-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \\
+    -y
+
+从指定中心恢复:
+  ./mysql-backup-restore-<arch>.run restore \\
+    --namespace mysql-demo \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --restore-source minio-c \\
+    --restore-snapshot latest \\
+    --restore-mode merge \\
+    --disable-default-backup-plan \\
+    --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \\
     -y
 
 独立压测:
-  ./mysql-installer.run benchmark \
-    --namespace mysql-demo \
-    --mysql-host 10.0.0.20 \
-    --mysql-port 3306 \
-    --mysql-user root \
-    --mysql-password '<MYSQL_PASSWORD>' \
-    --benchmark-profile standard \
-    --benchmark-threads 64 \
-    --benchmark-time 300 \
-    --benchmark-warmup-time 60 \
-    --benchmark-tables 16 \
-    --benchmark-table-size 200000 \
-    --report-dir ./reports \
+  ./mysql-benchmark-<arch>.run benchmark \\
+    --namespace mysql-demo \\
+    --mysql-host 10.0.0.20 \\
+    --mysql-user root \\
+    --mysql-password '<MYSQL_PASSWORD>' \\
+    --benchmark-profile oltp-read-write \\
+    --benchmark-threads 64 \\
+    --benchmark-time 300 \\
+    --report-dir ./reports \\
     -y
 EOF
 }
@@ -625,6 +769,9 @@ show_help() {
     backup-restore)
       show_help_backup_restore
       ;;
+    packages)
+      show_help_packages
+      ;;
     logging)
       show_help_logging
       ;;
@@ -635,12 +782,113 @@ show_help() {
       show_help_examples
       ;;
     *)
-      die "未知 help 主题: ${HELP_TOPIC}。可用主题: overview, install, addons, backup, restore, benchmark, params, backup-restore, logging, architecture, examples"
+      die "未知 help 主题: ${HELP_TOPIC}。可用主题: overview, install, addons, backup, restore, benchmark, params, backup-restore, packages, logging, architecture, examples"
+      ;;
+  esac
+}
+
+package_profile_label() {
+  case "${PACKAGE_PROFILE}" in
+    integrated)
+      echo "integrated"
+      ;;
+    backup-restore)
+      echo "backup-restore"
+      ;;
+    benchmark)
+      echo "benchmark"
+      ;;
+    monitoring)
+      echo "monitoring"
+      ;;
+    *)
+      echo "${PACKAGE_PROFILE}"
       ;;
   esac
 }
 
 
+package_profile_supports_action() {
+  local action_name="$1"
+
+  case "${PACKAGE_PROFILE}" in
+    integrated)
+      return 0
+      ;;
+    backup-restore)
+      case "${action_name}" in
+        help|status|addon-install|addon-uninstall|addon-status|backup|restore|verify-backup-restore)
+          return 0
+          ;;
+      esac
+      ;;
+    benchmark)
+      case "${action_name}" in
+        help|benchmark)
+          return 0
+          ;;
+      esac
+      ;;
+    monitoring)
+      case "${action_name}" in
+        help|status|addon-install|addon-uninstall|addon-status)
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      die "未知 package profile: ${PACKAGE_PROFILE}"
+      ;;
+  esac
+
+  return 1
+}
+
+
+package_profile_supports_addon() {
+  local addon_name="$1"
+
+  case "${PACKAGE_PROFILE}" in
+    integrated)
+      case "${addon_name}" in
+        monitoring|service-monitor|backup)
+          return 0
+          ;;
+      esac
+      ;;
+    backup-restore)
+      [[ "${addon_name}" == "backup" ]]
+      return
+      ;;
+    monitoring)
+      case "${addon_name}" in
+        monitoring|service-monitor)
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+
+  return 1
+}
+
+
+package_profile_supported_actions_text() {
+  case "${PACKAGE_PROFILE}" in
+    integrated)
+      echo "install uninstall status addon-install addon-uninstall addon-status backup restore verify-backup-restore benchmark help"
+      ;;
+    backup-restore)
+      echo "status addon-install addon-uninstall addon-status backup restore verify-backup-restore help"
+      ;;
+    benchmark)
+      echo "benchmark help"
+      ;;
+    monitoring)
+      echo "status addon-install addon-uninstall addon-status help"
+      ;;
+  esac
+}
 
 parse_args() {
   if [[ $# -eq 0 ]]; then
@@ -824,6 +1072,10 @@ parse_args() {
         BACKUP_BACKEND="$2"
         shift 2
         ;;
+      --backup-store-name)
+        BACKUP_STORE_NAME="$2"
+        shift 2
+        ;;
       --backup-nfs-server)
         BACKUP_NFS_SERVER="$2"
         shift 2
@@ -843,6 +1095,22 @@ parse_args() {
       --backup-retention)
         BACKUP_RETENTION="$2"
         shift 2
+        ;;
+      --backup-databases)
+        BACKUP_DATABASES="$2"
+        shift 2
+        ;;
+      --backup-tables)
+        BACKUP_TABLES="$2"
+        shift 2
+        ;;
+      --backup-plan)
+        BACKUP_PLAN_EXTRA_SPECS+=("$2")
+        shift 2
+        ;;
+      --disable-default-backup-plan)
+        BACKUP_DEFAULT_PLAN_ENABLED="false"
+        shift
         ;;
       --s3-endpoint)
         S3_ENDPOINT="$2"
@@ -887,6 +1155,10 @@ parse_args() {
         ;;
       --restore-mode)
         MYSQL_RESTORE_MODE="$2"
+        shift 2
+        ;;
+      --restore-source)
+        BACKUP_RESTORE_SOURCE="$2"
         shift 2
         ;;
       --wait-timeout)
@@ -1173,13 +1445,512 @@ resolve_feature_dependencies() {
 
 
 validate_action_feature_gates() {
+  package_profile_supports_action "${ACTION}" || die "当前产物包(${PACKAGE_PROFILE})不支持动作 ${ACTION}，可用动作: $(package_profile_supported_actions_text)"
+
   case "${ACTION}" in
     addon-install|addon-uninstall)
       [[ -n "${ADDONS}" ]] || die "动作 ${ACTION} 需要提供 --addons"
+      local addon_name
+      IFS=',' read -r -a requested_addons <<< "${ADDONS}"
+      for addon_name in "${requested_addons[@]}"; do
+        addon_name="$(trim_string "${addon_name}")"
+        [[ -n "${addon_name}" ]] || continue
+        package_profile_supports_addon "${addon_name}" || die "当前产物包(${PACKAGE_PROFILE})不支持 addon ${addon_name}"
+      done
       ;;
   esac
 }
 
+trim_string() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+
+
+normalize_csv_list() {
+  local raw="${1:-}"
+  local normalized=()
+  local item
+
+  raw="${raw//|/,}"
+  IFS=',' read -r -a items <<< "${raw}"
+  for item in "${items[@]}"; do
+    item="$(trim_string "${item}")"
+    [[ -n "${item}" ]] || continue
+    normalized+=("${item}")
+  done
+
+  (IFS=,; printf '%s' "${normalized[*]}")
+}
+
+
+capture_default_backup_plan_settings() {
+  [[ "${BACKUP_PLAN_DEFAULTS_CAPTURED}" == "true" ]] && return 0
+
+  BACKUP_PLAN_DEFAULT_NAME="${BACKUP_PLAN_NAME:-primary}"
+  BACKUP_PLAN_DEFAULT_STORE_NAME="${BACKUP_STORE_NAME:-${BACKUP_PLAN_DEFAULT_NAME}}"
+  BACKUP_PLAN_DEFAULT_BACKEND="${BACKUP_BACKEND}"
+  BACKUP_PLAN_DEFAULT_NFS_SERVER="${BACKUP_NFS_SERVER}"
+  BACKUP_PLAN_DEFAULT_NFS_PATH="${BACKUP_NFS_PATH}"
+  BACKUP_PLAN_DEFAULT_ROOT_DIR="${BACKUP_ROOT_DIR}"
+  BACKUP_PLAN_DEFAULT_SCHEDULE="${BACKUP_SCHEDULE}"
+  BACKUP_PLAN_DEFAULT_RETENTION="${BACKUP_RETENTION}"
+  BACKUP_PLAN_DEFAULT_S3_ENDPOINT="${S3_ENDPOINT}"
+  BACKUP_PLAN_DEFAULT_S3_BUCKET="${S3_BUCKET}"
+  BACKUP_PLAN_DEFAULT_S3_PREFIX="${S3_PREFIX}"
+  BACKUP_PLAN_DEFAULT_S3_ACCESS_KEY="${S3_ACCESS_KEY}"
+  BACKUP_PLAN_DEFAULT_S3_SECRET_KEY="${S3_SECRET_KEY}"
+  BACKUP_PLAN_DEFAULT_S3_INSECURE="${S3_INSECURE}"
+  BACKUP_PLAN_DEFAULT_CRONJOB_NAME="${BACKUP_CRONJOB_NAME}"
+  BACKUP_PLAN_DEFAULT_STORAGE_SECRET="${BACKUP_STORAGE_SECRET}"
+  BACKUP_PLAN_DEFAULT_DATABASES="${BACKUP_DATABASES}"
+  BACKUP_PLAN_DEFAULT_TABLES="${BACKUP_TABLES}"
+  BACKUP_PLAN_DEFAULTS_CAPTURED="true"
+}
+
+
+backup_plan_reset_active() {
+  capture_default_backup_plan_settings
+
+  BACKUP_PLAN_NAME="${BACKUP_PLAN_DEFAULT_NAME}"
+  BACKUP_STORE_NAME="${BACKUP_PLAN_DEFAULT_STORE_NAME}"
+  BACKUP_BACKEND="${BACKUP_PLAN_DEFAULT_BACKEND}"
+  BACKUP_NFS_SERVER="${BACKUP_PLAN_DEFAULT_NFS_SERVER}"
+  BACKUP_NFS_PATH="${BACKUP_PLAN_DEFAULT_NFS_PATH}"
+  BACKUP_ROOT_DIR="${BACKUP_PLAN_DEFAULT_ROOT_DIR}"
+  BACKUP_SCHEDULE="${BACKUP_PLAN_DEFAULT_SCHEDULE}"
+  BACKUP_RETENTION="${BACKUP_PLAN_DEFAULT_RETENTION}"
+  S3_ENDPOINT="${BACKUP_PLAN_DEFAULT_S3_ENDPOINT}"
+  S3_BUCKET="${BACKUP_PLAN_DEFAULT_S3_BUCKET}"
+  S3_PREFIX="${BACKUP_PLAN_DEFAULT_S3_PREFIX}"
+  S3_ACCESS_KEY="${BACKUP_PLAN_DEFAULT_S3_ACCESS_KEY}"
+  S3_SECRET_KEY="${BACKUP_PLAN_DEFAULT_S3_SECRET_KEY}"
+  S3_INSECURE="${BACKUP_PLAN_DEFAULT_S3_INSECURE}"
+  BACKUP_CRONJOB_NAME="${BACKUP_PLAN_DEFAULT_CRONJOB_NAME}"
+  BACKUP_STORAGE_SECRET="${BACKUP_PLAN_DEFAULT_STORAGE_SECRET}"
+  BACKUP_DATABASES="${BACKUP_PLAN_DEFAULT_DATABASES}"
+  BACKUP_TABLES="${BACKUP_PLAN_DEFAULT_TABLES}"
+}
+
+
+backup_plan_scope_type() {
+  if [[ -n "${BACKUP_TABLES}" ]]; then
+    echo "tables"
+  elif [[ -n "${BACKUP_DATABASES}" ]]; then
+    echo "databases"
+  else
+    echo "all"
+  fi
+}
+
+
+backup_plan_apply_derived_names() {
+  local normalized_name normalized_store
+
+  normalized_name="$(sanitize_target_name "${BACKUP_PLAN_NAME}")"
+  [[ -n "${normalized_name}" ]] || die "backup plan name 不能为空"
+  BACKUP_PLAN_NAME="${normalized_name}"
+
+  if [[ -n "${BACKUP_STORE_NAME}" ]]; then
+    normalized_store="$(sanitize_target_name "${BACKUP_STORE_NAME}")"
+  else
+    normalized_store="${BACKUP_PLAN_NAME}"
+  fi
+  [[ -n "${normalized_store}" ]] || die "backup store name 不能为空"
+  BACKUP_STORE_NAME="${normalized_store}"
+
+  if [[ "${BACKUP_PLAN_NAME}" == "${BACKUP_PLAN_DEFAULT_NAME}" ]]; then
+    BACKUP_CRONJOB_NAME="${BACKUP_PLAN_DEFAULT_CRONJOB_NAME}"
+    BACKUP_STORAGE_SECRET="${BACKUP_PLAN_DEFAULT_STORAGE_SECRET}"
+  else
+    BACKUP_CRONJOB_NAME="${BACKUP_PLAN_DEFAULT_CRONJOB_NAME}-${BACKUP_PLAN_NAME}"
+    BACKUP_STORAGE_SECRET="${BACKUP_PLAN_DEFAULT_STORAGE_SECRET}-${BACKUP_PLAN_NAME}"
+  fi
+}
+
+
+backup_plan_validate_active() {
+  local schedule_required="${1:-false}"
+  local entry database_name table_name
+
+  [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "backup plan ${BACKUP_PLAN_NAME} 的 backend 仅支持 nfs 或 s3"
+  [[ "${BACKUP_RETENTION}" =~ ^[0-9]+$ ]] || die "backup plan ${BACKUP_PLAN_NAME} 的 retention 必须是数字"
+
+  if [[ "${schedule_required}" == "true" && -z "${BACKUP_SCHEDULE}" ]]; then
+    die "backup plan ${BACKUP_PLAN_NAME} 缺少 schedule"
+  fi
+
+  if [[ -n "${BACKUP_DATABASES}" && -n "${BACKUP_TABLES}" ]]; then
+    die "backup plan ${BACKUP_PLAN_NAME} 不能同时指定 databases 和 tables"
+  fi
+
+  if [[ "${BACKUP_BACKEND}" == "nfs" ]]; then
+    [[ -n "${BACKUP_NFS_SERVER}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 使用 NFS 时必须提供 nfsServer"
+    [[ -n "${BACKUP_NFS_PATH}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 使用 NFS 时必须提供 nfsPath"
+  fi
+
+  if [[ "${BACKUP_BACKEND}" == "s3" ]]; then
+    [[ -n "${S3_ENDPOINT}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 使用 S3 时必须提供 s3Endpoint"
+    [[ -n "${S3_BUCKET}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 使用 S3 时必须提供 s3Bucket"
+    [[ -n "${S3_ACCESS_KEY}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 使用 S3 时必须提供 s3AccessKey"
+    [[ -n "${S3_SECRET_KEY}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 使用 S3 时必须提供 s3SecretKey"
+  fi
+
+  if [[ -n "${BACKUP_TABLES}" ]]; then
+    IFS=',' read -r -a entries <<< "${BACKUP_TABLES}"
+    for entry in "${entries[@]}"; do
+      entry="$(trim_string "${entry}")"
+      [[ -n "${entry}" ]] || continue
+      database_name="${entry%%.*}"
+      table_name="${entry#*.}"
+      [[ -n "${database_name}" && -n "${table_name}" && "${database_name}" != "${entry}" ]] || die "backup plan ${BACKUP_PLAN_NAME} 的 tables 需使用 db.table 形式: ${entry}"
+    done
+  fi
+}
+
+
+backup_plan_serialize_active() {
+  printf 'name=%s;storeName=%s;backend=%s;rootDir=%s;schedule=%s;retention=%s;nfsServer=%s;nfsPath=%s;s3Endpoint=%s;s3Bucket=%s;s3Prefix=%s;s3AccessKey=%s;s3SecretKey=%s;s3Insecure=%s;databases=%s;tables=%s' \
+    "${BACKUP_PLAN_NAME}" \
+    "${BACKUP_STORE_NAME}" \
+    "${BACKUP_BACKEND}" \
+    "${BACKUP_ROOT_DIR}" \
+    "${BACKUP_SCHEDULE}" \
+    "${BACKUP_RETENTION}" \
+    "${BACKUP_NFS_SERVER}" \
+    "${BACKUP_NFS_PATH}" \
+    "${S3_ENDPOINT}" \
+    "${S3_BUCKET}" \
+    "${S3_PREFIX}" \
+    "${S3_ACCESS_KEY}" \
+    "${S3_SECRET_KEY}" \
+    "${S3_INSECURE}" \
+    "${BACKUP_DATABASES}" \
+    "${BACKUP_TABLES}"
+}
+
+
+backup_plan_activate_spec() {
+  local raw_spec="$1"
+  local part key value
+  local store_name_explicit="false"
+
+  backup_plan_reset_active
+  [[ -n "${raw_spec}" ]] || {
+    backup_plan_apply_derived_names
+    return 0
+  }
+
+  IFS=';' read -r -a parts <<< "${raw_spec}"
+  for part in "${parts[@]}"; do
+    part="$(trim_string "${part}")"
+    [[ -n "${part}" ]] || continue
+    [[ "${part}" == *=* ]] || die "backup plan 配置格式错误: ${part}"
+    key="$(trim_string "${part%%=*}")"
+    value="$(trim_string "${part#*=}")"
+
+    case "${key}" in
+      name)
+        BACKUP_PLAN_NAME="${value}"
+        ;;
+      storeName|store|store-name)
+        BACKUP_STORE_NAME="${value}"
+        store_name_explicit="true"
+        ;;
+      type|backend)
+        BACKUP_BACKEND="${value}"
+        ;;
+      rootDir|root|root-dir)
+        BACKUP_ROOT_DIR="${value}"
+        ;;
+      schedule)
+        BACKUP_SCHEDULE="${value}"
+        ;;
+      retention)
+        BACKUP_RETENTION="${value}"
+        ;;
+      nfsServer|nfs-server)
+        BACKUP_NFS_SERVER="${value}"
+        ;;
+      nfsPath|nfs-path)
+        BACKUP_NFS_PATH="${value}"
+        ;;
+      s3Endpoint|s3-endpoint)
+        S3_ENDPOINT="${value}"
+        ;;
+      s3Bucket|s3-bucket)
+        S3_BUCKET="${value}"
+        ;;
+      s3Prefix|s3-prefix)
+        S3_PREFIX="${value}"
+        ;;
+      s3AccessKey|s3-access-key)
+        S3_ACCESS_KEY="${value}"
+        ;;
+      s3SecretKey|s3-secret-key)
+        S3_SECRET_KEY="${value}"
+        ;;
+      s3Insecure|s3-insecure)
+        S3_INSECURE="${value}"
+        ;;
+      databases|dbs)
+        BACKUP_DATABASES="$(normalize_csv_list "${value}")"
+        ;;
+      tables)
+        BACKUP_TABLES="$(normalize_csv_list "${value}")"
+        ;;
+      *)
+        die "backup plan ${raw_spec} 中存在未知字段: ${key}"
+        ;;
+    esac
+  done
+
+  BACKUP_DATABASES="$(normalize_csv_list "${BACKUP_DATABASES}")"
+  BACKUP_TABLES="$(normalize_csv_list "${BACKUP_TABLES}")"
+  if [[ -n "${raw_spec}" && "${store_name_explicit}" != "true" ]]; then
+    BACKUP_STORE_NAME=""
+  fi
+  backup_plan_apply_derived_names
+}
+
+
+backup_plan_catalog_required() {
+  case "${ACTION}" in
+    install)
+      [[ "${BACKUP_ENABLED}" == "true" ]]
+      ;;
+    addon-install)
+      addon_selected backup
+      ;;
+    backup|restore|verify-backup-restore)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+
+backup_plan_default_requested() {
+  [[ "${BACKUP_DEFAULT_PLAN_ENABLED}" == "true" || ${#BACKUP_PLAN_EXTRA_SPECS[@]} -eq 0 ]]
+}
+
+
+backup_plan_default_spec() {
+  backup_plan_activate_spec ""
+  printf '%s' "$(backup_plan_serialize_active)"
+}
+
+
+backup_plan_build_catalog() {
+  local spec normalized_spec
+  local existing_name
+
+  BACKUP_PLAN_CATALOG=()
+  BACKUP_PLAN_NAMES=()
+
+  backup_plan_catalog_required || return 0
+
+  if [[ "${BACKUP_DEFAULT_PLAN_ENABLED}" == "true" || ${#BACKUP_PLAN_EXTRA_SPECS[@]} -eq 0 ]]; then
+    normalized_spec="$(backup_plan_default_spec)"
+    BACKUP_PLAN_CATALOG+=("${normalized_spec}")
+    BACKUP_PLAN_NAMES+=("${BACKUP_PLAN_NAME}")
+  fi
+
+  for spec in "${BACKUP_PLAN_EXTRA_SPECS[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    normalized_spec="$(backup_plan_serialize_active)"
+
+    for existing_name in "${BACKUP_PLAN_NAMES[@]}"; do
+      [[ "${existing_name}" != "${BACKUP_PLAN_NAME}" ]] || die "backup plan name 重复: ${BACKUP_PLAN_NAME}"
+    done
+
+    BACKUP_PLAN_CATALOG+=("${normalized_spec}")
+    BACKUP_PLAN_NAMES+=("${BACKUP_PLAN_NAME}")
+  done
+
+  (( ${#BACKUP_PLAN_CATALOG[@]} > 0 )) || die "未找到可用的 backup plan，请提供默认备份配置，或通过 --backup-plan 显式定义"
+  backup_plan_activate_spec "${BACKUP_PLAN_CATALOG[0]}"
+}
+
+
+backup_plan_validate_catalog() {
+  local spec
+  local schedule_required="false"
+
+  backup_schedule_required && schedule_required="true"
+  backup_plan_build_catalog
+
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    backup_plan_validate_active "${schedule_required}"
+  done
+
+  if [[ "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" ]]; then
+    if [[ "${BACKUP_RESTORE_SOURCE}" != "auto" ]]; then
+      backup_plan_spec_by_name "${BACKUP_RESTORE_SOURCE}" >/dev/null || die "未找到 restore-source=${BACKUP_RESTORE_SOURCE} 对应的 backup plan"
+    fi
+  fi
+
+  if (( ${#BACKUP_PLAN_CATALOG[@]} > 0 )); then
+    backup_plan_activate_spec "${BACKUP_PLAN_CATALOG[0]}"
+  fi
+}
+
+
+backup_plan_spec_by_name() {
+  local plan_name="$1"
+  local index
+
+  backup_plan_build_catalog
+  for ((index=0; index<${#BACKUP_PLAN_NAMES[@]}; index++)); do
+    if [[ "${BACKUP_PLAN_NAMES[$index]}" == "${plan_name}" ]]; then
+      printf '%s' "${BACKUP_PLAN_CATALOG[$index]}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+
+backup_plan_specs_for_restore() {
+  local spec
+
+  backup_plan_build_catalog
+  if [[ "${BACKUP_RESTORE_SOURCE}" == "auto" ]]; then
+    printf '%s\n' "${BACKUP_PLAN_CATALOG[@]}"
+    return 0
+  fi
+
+  spec="$(backup_plan_spec_by_name "${BACKUP_RESTORE_SOURCE}")" || return 1
+  printf '%s\n' "${spec}"
+}
+
+
+backup_plan_any_uses_backend() {
+  local backend_name="$1"
+  local spec
+
+  backup_plan_build_catalog
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    if [[ "${BACKUP_BACKEND}" == "${backend_name}" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+
+csv_list_contains() {
+  local csv_list="$1"
+  local expected="$2"
+  local item
+
+  IFS=',' read -r -a items <<< "${csv_list}"
+  for item in "${items[@]}"; do
+    item="$(trim_string "${item}")"
+    [[ -n "${item}" ]] || continue
+    [[ "${item}" == "${expected}" ]] && return 0
+  done
+
+  return 1
+}
+
+
+backup_plan_supports_wipe_restore() {
+  [[ "$(backup_plan_scope_type)" == "all" ]]
+}
+
+
+backup_plan_contains_database() {
+  local database_name="$1"
+  local scope_type
+
+  scope_type="$(backup_plan_scope_type)"
+  case "${scope_type}" in
+    all)
+      return 0
+      ;;
+    databases)
+      csv_list_contains "${BACKUP_DATABASES}" "${database_name}"
+      return
+      ;;
+    tables)
+      local item
+      IFS=',' read -r -a items <<< "${BACKUP_TABLES}"
+      for item in "${items[@]}"; do
+        item="$(trim_string "${item}")"
+        [[ -n "${item}" ]] || continue
+        [[ "${item}" == "${database_name}."* ]] && return 0
+      done
+      ;;
+  esac
+
+  return 1
+}
+
+
+backup_plan_contains_table() {
+  local table_selector="$1"
+  local database_name="${table_selector%%.*}"
+
+  if [[ "$(backup_plan_scope_type)" == "all" ]]; then
+    return 0
+  fi
+
+  if [[ "$(backup_plan_scope_type)" == "databases" ]]; then
+    csv_list_contains "${BACKUP_DATABASES}" "${database_name}"
+    return
+  fi
+
+  csv_list_contains "${BACKUP_TABLES}" "${table_selector}"
+}
+
+
+backup_plan_supports_verify_marker() {
+  backup_plan_contains_table "offline_validation.backup_restore_check" && return 0
+  backup_plan_contains_database "offline_validation"
+}
+
+
+backup_plan_scope_summary() {
+  case "$(backup_plan_scope_type)" in
+    all)
+      echo "all"
+      ;;
+    databases)
+      echo "databases:${BACKUP_DATABASES}"
+      ;;
+    tables)
+      echo "tables:${BACKUP_TABLES}"
+      ;;
+  esac
+}
+
+
+backup_plan_summary_lines() {
+  local spec
+  local index=1
+
+  backup_plan_build_catalog
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    printf '  %s. %s | backend=%s | store=%s | schedule=%s | scope=%s\n' \
+      "${index}" \
+      "${BACKUP_PLAN_NAME}" \
+      "${BACKUP_BACKEND}" \
+      "${BACKUP_STORE_NAME}" \
+      "${BACKUP_SCHEDULE:-manual-only}" \
+      "$(backup_plan_scope_summary)"
+    index=$((index + 1))
+  done
+}
 
 secret_has_key() {
   local secret_name="$1"
@@ -1235,12 +2006,12 @@ prepare_runtime_auth_secret() {
 }
 
 prompt_missing_values() {
-  if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
+  if needs_backup_storage && backup_plan_default_requested && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
     echo -ne "${YELLOW}请输入 NFS 服务器地址:${NC} "
     read -r BACKUP_NFS_SERVER
   fi
 
-  if needs_backup_storage && backup_backend_is_s3; then
+  if needs_backup_storage && backup_plan_default_requested && backup_backend_is_s3; then
     if [[ -z "${S3_ENDPOINT}" ]]; then
       echo -ne "${YELLOW}请输入 S3 Endpoint（如 https://minio.example.com）:${NC} "
       read -r S3_ENDPOINT
@@ -1260,7 +2031,9 @@ prompt_missing_values() {
     fi
   fi
 
-  [[ -n "${BACKUP_NFS_PATH}" ]] || BACKUP_NFS_PATH="/data/nfs-share"
+  if needs_backup_storage && backup_plan_default_requested; then
+    [[ -n "${BACKUP_NFS_PATH}" ]] || BACKUP_NFS_PATH="/data/nfs-share"
+  fi
 }
 
 
@@ -1294,20 +2067,26 @@ validate_inputs() {
   [[ "${BENCHMARK_TABLES}" =~ ^[0-9]+$ ]] || die "压测表数必须是数字"
   [[ "${BENCHMARK_TABLE_SIZE}" =~ ^[0-9]+$ ]] || die "压测单表数据量必须是数字"
   [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
-  [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
   [[ "${MYSQL_RESTORE_MODE}" =~ ^(merge|wipe-all-user-databases)$ ]] || die "restore-mode 仅支持 merge 或 wipe-all-user-databases"
   [[ "${BENCHMARK_PROFILE}" =~ ^(standard|oltp-point-select|oltp-read-only|oltp-read-write)$ ]] || die "benchmark-profile 仅支持 standard、oltp-point-select、oltp-read-only、oltp-read-write"
 
-  if needs_backup_storage && backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
-    die "使用 NFS 备份时必须提供 --backup-nfs-server"
+  if needs_backup_storage && backup_plan_default_requested; then
+    [[ "${BACKUP_BACKEND}" == "nfs" || "${BACKUP_BACKEND}" == "s3" ]] || die "备份后端仅支持 nfs 或 s3"
+    [[ "${BACKUP_RETENTION}" =~ ^[0-9]+$ ]] || die "备份保留数量必须是数字"
+
+    if backup_backend_is_nfs && [[ -z "${BACKUP_NFS_SERVER}" ]]; then
+      die "使用 NFS 备份时必须提供 --backup-nfs-server"
+    fi
+
+    if backup_backend_is_s3; then
+      [[ -n "${S3_ENDPOINT}" ]] || die "使用 S3 备份时必须提供 --s3-endpoint"
+      [[ -n "${S3_BUCKET}" ]] || die "使用 S3 备份时必须提供 --s3-bucket"
+      [[ -n "${S3_ACCESS_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-access-key"
+      [[ -n "${S3_SECRET_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-secret-key"
+    fi
   fi
 
-  if needs_backup_storage && backup_backend_is_s3; then
-    [[ -n "${S3_ENDPOINT}" ]] || die "使用 S3 备份时必须提供 --s3-endpoint"
-    [[ -n "${S3_BUCKET}" ]] || die "使用 S3 备份时必须提供 --s3-bucket"
-    [[ -n "${S3_ACCESS_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-access-key"
-    [[ -n "${S3_SECRET_KEY}" ]] || die "使用 S3 备份时必须提供 --s3-secret-key"
-  fi
+  backup_plan_validate_catalog
 
   validate_action_feature_gates
 }
@@ -1324,6 +2103,7 @@ mysql_auth_source_summary() {
 print_plan() {
   section "执行计划"
   echo "动作                    : ${ACTION}"
+  echo "产物包                  : $(package_profile_label)"
   echo "命名空间                : ${NAMESPACE}"
   echo "等待超时                : ${WAIT_TIMEOUT}"
 
@@ -1412,18 +2192,10 @@ print_plan() {
   esac
 
   if needs_backup_storage; then
-    echo "备份根目录              : ${BACKUP_ROOT_DIR}"
-    if backup_schedule_required; then
-      echo "备份计划                : ${BACKUP_SCHEDULE}"
-    fi
-    if backup_backend_is_nfs; then
-      echo "NFS 服务地址            : ${BACKUP_NFS_SERVER}"
-      echo "NFS 导出路径            : ${BACKUP_NFS_PATH}"
-    else
-      echo "S3 Endpoint             : ${S3_ENDPOINT}"
-      echo "S3 Bucket               : ${S3_BUCKET}"
-      echo "S3 Prefix               : ${S3_PREFIX:-<空>}"
-      echo "S3 Insecure             : ${S3_INSECURE}"
+    echo "backup plans            : ${#BACKUP_PLAN_CATALOG[@]}"
+    backup_plan_summary_lines
+    if [[ "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" ]]; then
+      echo "restore source          : ${BACKUP_RESTORE_SOURCE}"
     fi
   fi
 }
@@ -1436,8 +2208,6 @@ confirm_plan() {
   read -r answer
   [[ "${answer}" =~ ^[Yy]$ ]] || die "用户取消执行"
 }
-
-
 
 docker_login() {
   log "登录镜像仓库 ${REGISTRY_ADDR}"
@@ -1513,13 +2283,6 @@ payload_cache_ready() {
 
   [[ -f "${signature_file}" ]] || return 1
   [[ "$(cat "${signature_file}")" == "${expected_signature}" ]] || return 1
-  [[ -f "${MYSQL_MANIFEST}" ]] || return 1
-  [[ -f "${BACKUP_MANIFEST}" ]] || return 1
-  [[ -f "${BACKUP_SUPPORT_MANIFEST}" ]] || return 1
-  [[ -f "${BACKUP_JOB_MANIFEST}" ]] || return 1
-  [[ -f "${RESTORE_MANIFEST}" ]] || return 1
-  [[ -f "${BENCHMARK_MANIFEST}" ]] || return 1
-  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || return 1
   [[ -f "${IMAGE_JSON}" ]] || return 1
 }
 
@@ -1657,6 +2420,7 @@ render_manifest() {
 
 
 apply_mysql_manifests() {
+  require_manifest_file "${MYSQL_MANIFEST}"
   render_manifest "${MYSQL_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
@@ -1667,6 +2431,7 @@ apply_backup_manifests() {
 
 
 apply_monitoring_addon_manifests() {
+  require_manifest_file "${MONITORING_ADDON_MANIFEST}"
   render_manifest "${MONITORING_ADDON_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
@@ -1711,13 +2476,6 @@ extract_payload() {
   log "正在解压元数据到 ${WORKDIR}"
   payload_extract_entries "${WORKDIR}" "./manifests" "./images/image.json" || die "解压载荷元数据失败"
 
-  [[ -f "${MYSQL_MANIFEST}" ]] || die "缺少 MySQL manifest"
-  [[ -f "${BACKUP_MANIFEST}" ]] || die "缺少 backup cronjob manifest"
-  [[ -f "${BACKUP_SUPPORT_MANIFEST}" ]] || die "缺少 backup support manifest"
-  [[ -f "${BACKUP_JOB_MANIFEST}" ]] || die "缺少 backup job manifest"
-  [[ -f "${RESTORE_MANIFEST}" ]] || die "缺少 restore manifest"
-  [[ -f "${BENCHMARK_MANIFEST}" ]] || die "缺少 benchmark manifest"
-  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || die "缺少 monitoring addon manifest"
   [[ -f "${IMAGE_JSON}" ]] || die "缺少 image.json"
 
   printf '%s\n' "${expected_signature}" > "${signature_file}"
@@ -1736,10 +2494,13 @@ image_needed_for_current_action() {
       if addon_selected monitoring && [[ "${image_tag}" == */mysqld-exporter:* ]]; then
         return 0
       fi
+      if addon_selected monitoring && [[ "${image_tag}" == */mysql:* ]]; then
+        return 0
+      fi
       if addon_selected backup && [[ "${image_tag}" == */mysql:* ]]; then
         return 0
       fi
-      if addon_selected backup && backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+      if addon_selected backup && backup_plan_any_uses_backend s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
         return 0
       fi
       return 1
@@ -1748,7 +2509,7 @@ image_needed_for_current_action() {
       if [[ "${image_tag}" == */mysql:* ]]; then
         return 0
       fi
-      if backup_backend_is_s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+      if backup_plan_any_uses_backend s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
         return 0
       fi
       return 1
@@ -1800,11 +2561,15 @@ template_replace() {
     -e "s#__BACKUP_CRONJOB_NAME__#${BACKUP_CRONJOB_NAME}#g" \
     -e "s#__BACKUP_JOB_NAME__#${BACKUP_JOB_NAME:-mysql-backup-manual}#g" \
     -e "s#__BACKUP_STORAGE_SECRET__#${BACKUP_STORAGE_SECRET}#g" \
+    -e "s#__BACKUP_PLAN_NAME__#${BACKUP_PLAN_NAME}#g" \
+    -e "s#__BACKUP_STORE_NAME__#${BACKUP_STORE_NAME}#g" \
     -e "s#__BACKUP_NFS_SERVER__#${BACKUP_NFS_SERVER}#g" \
     -e "s#__BACKUP_NFS_PATH__#${BACKUP_NFS_PATH}#g" \
     -e "s#__BACKUP_ROOT_DIR__#${BACKUP_ROOT_DIR}#g" \
     -e "s#__BACKUP_SCHEDULE__#${BACKUP_SCHEDULE}#g" \
     -e "s#__BACKUP_RETENTION__#${BACKUP_RETENTION}#g" \
+    -e "s#__BACKUP_DATABASES__#${BACKUP_DATABASES}#g" \
+    -e "s#__BACKUP_TABLES__#${BACKUP_TABLES}#g" \
     -e "s#__RESTORE_SNAPSHOT__#${RESTORE_SNAPSHOT}#g" \
     -e "s#__MYSQL_RESTORE_MODE__#${MYSQL_RESTORE_MODE}#g" \
     -e "s#__S3_ENDPOINT__#${S3_ENDPOINT}#g" \
@@ -1843,22 +2608,32 @@ template_replace() {
     -e "s#__BENCHMARK_USER__#${BENCHMARK_USER}#g"
 }
 
+require_manifest_file() {
+  local file_path="$1"
+  [[ -f "${file_path}" ]] || die "当前产物包缺少必需 manifest: ${file_path}"
+}
+
+
 apply_backup_support_manifests() {
+  require_manifest_file "${BACKUP_SUPPORT_MANIFEST}"
   render_manifest "${BACKUP_SUPPORT_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 apply_backup_schedule_manifests() {
+  require_manifest_file "${BACKUP_MANIFEST}"
   render_manifest "${BACKUP_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 apply_restore_job() {
+  require_manifest_file "${RESTORE_MANIFEST}"
   render_manifest "${RESTORE_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 apply_benchmark_job() {
+  require_manifest_file "${BENCHMARK_MANIFEST}"
   render_manifest "${BENCHMARK_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
@@ -2217,11 +2992,13 @@ show_addon_status() {
   local embedded_logging="未安装"
   local addon_service_monitor="未安装"
   local embedded_service_monitor="未安装"
+  local backup_selector
 
   require_namespace_exists
 
   resource_exists deployment "${ADDON_EXPORTER_DEPLOYMENT_NAME}" && external_monitoring="已安装"
-  resource_exists cronjob "${BACKUP_CRONJOB_NAME}" && backup_addon="已安装"
+  backup_selector="$(backup_resource_selector)"
+  kubectl get cronjob -n "${NAMESPACE}" -l "${backup_selector}" -o name 2>/dev/null | grep -q . && backup_addon="已安装"
 
   if resource_exists statefulset "${STS_NAME}"; then
     statefulset_has_container "mysqld-exporter" && embedded_monitoring="已安装"
@@ -2322,8 +3099,8 @@ install_app() {
   section "安装 / 对齐 MySQL"
   apply_mysql_manifests
   if [[ "${BACKUP_ENABLED}" == "true" ]]; then
-    apply_backup_support_manifests
-    apply_backup_schedule_manifests
+    apply_backup_support_manifests_for_all_plans
+    apply_backup_schedule_manifests_for_all_plans
   else
     warn "当前关闭了备份组件，将清理 backup CronJob 及支持资源"
   fi
@@ -2374,20 +3151,46 @@ install_addons() {
       die "为已有外部 MySQL 安装 backup addon 时，请显式提供 --mysql-host"
     fi
 
-    apply_backup_support_manifests
+    apply_backup_support_manifests_for_all_plans
     preflight_mysql_connection "预检 backup addon 目标连接"
 
     section "安装 backup addon"
-    apply_backup_schedule_manifests
+    apply_backup_schedule_manifests_for_all_plans
     success "backup addon 安装完成"
   fi
+}
+
+backup_resource_selector() {
+  echo "app.kubernetes.io/component=backup"
+}
+
+
+apply_backup_support_manifests_for_all_plans() {
+  local spec
+
+  backup_plan_build_catalog
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    apply_backup_support_manifests
+  done
+}
+
+
+apply_backup_schedule_manifests_for_all_plans() {
+  local spec
+
+  backup_plan_build_catalog
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    apply_backup_schedule_manifests
+  done
 }
 
 
 create_manual_backup_job() {
   local job_name="${BACKUP_CRONJOB_NAME}-manual-$(date +%Y%m%d%H%M%S)-$RANDOM"
 
-  log "创建手工备份 Job ${job_name}" >&2
+  log "创建手工备份 Job ${job_name} (plan=${BACKUP_PLAN_NAME})" >&2
   BACKUP_JOB_NAME="${job_name}" render_manifest "${BACKUP_JOB_MANIFEST}" \
     | kubectl apply -n "${NAMESPACE}" -f - >/dev/null
 
@@ -2396,9 +3199,9 @@ create_manual_backup_job() {
 
 
 create_restore_job() {
-  local restore_job_name="mysql-restore-$(date +%Y%m%d%H%M%S)-$RANDOM"
+  local restore_job_name="mysql-restore-${BACKUP_PLAN_NAME}-$(date +%Y%m%d%H%M%S)-$RANDOM"
 
-  log "创建恢复 Job ${restore_job_name}" >&2
+  log "创建恢复 Job ${restore_job_name} (plan=${BACKUP_PLAN_NAME})" >&2
   RESTORE_JOB_NAME="${restore_job_name}" render_manifest "${RESTORE_MANIFEST}" \
     | kubectl apply -n "${NAMESPACE}" -f - >/dev/null
 
@@ -2418,48 +3221,87 @@ create_benchmark_job() {
 
 
 delete_backup_resources() {
-  kubectl delete cronjob -n "${NAMESPACE}" --ignore-not-found "${BACKUP_CRONJOB_NAME}" >/dev/null 2>&1 || true
-  kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${BACKUP_SCRIPT_CONFIGMAP}" >/dev/null 2>&1 || true
-  kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${BACKUP_STORAGE_SECRET}" >/dev/null 2>&1 || true
+  local selector
+  selector="$(backup_resource_selector)"
+  kubectl delete cronjob -n "${NAMESPACE}" -l "${selector}" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete job -n "${NAMESPACE}" -l "${selector}" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete configmap -n "${NAMESPACE}" -l "${selector}" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete secret -n "${NAMESPACE}" -l "${selector}" --ignore-not-found >/dev/null 2>&1 || true
 }
 
 
 run_backup() {
+  local spec job_name
+  local completed_jobs=()
+
   extract_payload
   prepare_images
   ensure_namespace
-  apply_backup_support_manifests
   preflight_mysql_connection "预检备份目标连接"
 
   section "执行手工备份"
-  local job_name
-  job_name="$(create_manual_backup_job)"
-  wait_for_job "${job_name}" || die "备份任务失败"
+  backup_plan_build_catalog
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    apply_backup_support_manifests
+    job_name="$(create_manual_backup_job)"
+    wait_for_job "${job_name}" || die "备份任务失败，plan=${BACKUP_PLAN_NAME}"
+    completed_jobs+=("${BACKUP_PLAN_NAME}:${job_name}")
+  done
+
+  success "所有 backup plan 执行完成"
+  printf '%s\n' "${completed_jobs[@]}"
 }
 
+
 run_restore() {
+  local spec restore_job_name
+
   extract_payload
   prepare_images
   ensure_namespace
-  apply_backup_support_manifests
   preflight_mysql_connection "预检恢复目标连接"
 
   section "执行数据恢复"
-  local restore_job_name
-  restore_job_name="$(create_restore_job)"
-  wait_for_job "${restore_job_name}" || die "恢复任务失败"
+  while IFS= read -r spec; do
+    [[ -n "${spec}" ]] || continue
+    backup_plan_activate_spec "${spec}"
+
+    if [[ "${MYSQL_RESTORE_MODE}" == "wipe-all-user-databases" ]] && ! backup_plan_supports_wipe_restore; then
+      if [[ "${BACKUP_RESTORE_SOURCE}" != "auto" ]]; then
+        die "restore-source=${BACKUP_PLAN_NAME} 是部分备份，不支持 wipe-all-user-databases；请改用 merge，或选择全量备份来源"
+      fi
+      warn "restore-source=${BACKUP_PLAN_NAME} 是部分备份，与 wipe-all-user-databases 不兼容，跳过"
+      continue
+    fi
+
+    apply_backup_support_manifests
+    restore_job_name="$(create_restore_job)"
+    if wait_for_job "${restore_job_name}"; then
+      success "恢复任务完成，source plan=${BACKUP_PLAN_NAME}"
+      echo "恢复作业: ${restore_job_name}"
+      return 0
+    fi
+    warn "restore-source=${BACKUP_PLAN_NAME} 恢复失败，继续尝试下一个来源"
+  done < <(backup_plan_specs_for_restore)
+
+  die "恢复任务失败，所有 restore-source 均未成功"
 }
 
+
 verify_backup_restore() {
+  local snapshot_value changed_value restored_value backup_job restore_job report_path
+  local spec
+  local backup_jobs=()
+  local restore_source_plan=""
+
   extract_payload
   prepare_images
   ensure_namespace
-  apply_backup_support_manifests
   preflight_mysql_connection "预检备份/恢复目标连接"
 
   section "执行备份/恢复闭环校验"
 
-  local snapshot_value changed_value restored_value backup_job restore_job report_path
   snapshot_value="snapshot-$(date +%s)"
   changed_value="changed-$(date +%s)"
 
@@ -2468,14 +3310,50 @@ verify_backup_restore() {
   mysql_exec "CREATE TABLE IF NOT EXISTS offline_validation.backup_restore_check (id INT PRIMARY KEY, marker VARCHAR(128) NOT NULL);"
   mysql_exec "REPLACE INTO offline_validation.backup_restore_check (id, marker) VALUES (1, '${snapshot_value}');"
 
-  backup_job="$(create_manual_backup_job)"
-  wait_for_job "${backup_job}" || die "校验用备份任务失败"
+  backup_plan_build_catalog
+  for spec in "${BACKUP_PLAN_CATALOG[@]}"; do
+    backup_plan_activate_spec "${spec}"
+    apply_backup_support_manifests
+    backup_job="$(create_manual_backup_job)"
+    wait_for_job "${backup_job}" || die "校验用备份任务失败，plan=${BACKUP_PLAN_NAME}"
+    backup_jobs+=("${BACKUP_PLAN_NAME}:${backup_job}")
+  done
 
   log "修改数据，准备验证恢复结果"
   mysql_exec "UPDATE offline_validation.backup_restore_check SET marker='${changed_value}' WHERE id=1;"
 
-  restore_job="$(create_restore_job)"
-  wait_for_job "${restore_job}" || die "校验用恢复任务失败"
+  restore_job=""
+  while IFS= read -r spec; do
+    [[ -n "${spec}" ]] || continue
+    backup_plan_activate_spec "${spec}"
+
+    if ! backup_plan_supports_verify_marker; then
+      if [[ "${BACKUP_RESTORE_SOURCE}" != "auto" ]]; then
+        die "restore-source=${BACKUP_PLAN_NAME} 未覆盖 offline_validation.backup_restore_check，无法做闭环校验"
+      fi
+      warn "restore-source=${BACKUP_PLAN_NAME} 未覆盖 offline_validation 校验表，跳过"
+      continue
+    fi
+
+    if [[ "${MYSQL_RESTORE_MODE}" == "wipe-all-user-databases" ]] && ! backup_plan_supports_wipe_restore; then
+      if [[ "${BACKUP_RESTORE_SOURCE}" != "auto" ]]; then
+        die "restore-source=${BACKUP_PLAN_NAME} 是部分备份，不支持 wipe-all-user-databases 闭环校验"
+      fi
+      warn "restore-source=${BACKUP_PLAN_NAME} 是部分备份，与 wipe-all-user-databases 不兼容，跳过"
+      continue
+    fi
+
+    apply_backup_support_manifests
+    restore_job="$(create_restore_job)"
+    if wait_for_job "${restore_job}"; then
+      restore_source_plan="${BACKUP_PLAN_NAME}"
+      break
+    fi
+    restore_job=""
+    warn "校验恢复在 plan=${BACKUP_PLAN_NAME} 失败，继续尝试下一个来源"
+  done < <(backup_plan_specs_for_restore)
+
+  [[ -n "${restore_job}" ]] || die "校验用恢复任务失败"
 
   restored_value="$(mysql_exec "SELECT marker FROM offline_validation.backup_restore_check WHERE id=1;")"
   [[ "${restored_value}" == "${snapshot_value}" ]] || die "备份/恢复闭环校验失败，期望 ${snapshot_value}，实际 ${restored_value}"
@@ -2485,9 +3363,9 @@ mysql backup/restore verification report
 generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 namespace=${NAMESPACE}
 mysql_target=${MYSQL_TARGET_NAME}
-backup_job=${backup_job}
+backup_jobs=${backup_jobs[*]}
 restore_job=${restore_job}
-backup_backend=${BACKUP_BACKEND}
+restore_source=${restore_source_plan:-${BACKUP_RESTORE_SOURCE}}
 restore_mode=${MYSQL_RESTORE_MODE}
 snapshot_value=${snapshot_value}
 restored_value=${restored_value}
@@ -2498,7 +3376,6 @@ EOF
   success "备份/恢复闭环校验成功"
   echo "报告文件: ${report_path}"
 }
-
 
 extract_benchmark_report_block() {
   local content="$1"
@@ -2589,6 +3466,12 @@ EOF
 }
 
 show_post_addon_notes() {
+  local backup_line="3. backup addon 会额外创建 CronJob"
+  if needs_backup_storage; then
+    backup_plan_build_catalog
+    backup_line="3. backup addon 会额外创建 ${#BACKUP_PLAN_CATALOG[@]} 个备份计划资源（CronJob/Secret）"
+  fi
+
   section "Addon 后续建议"
   cat <<EOF
 kubectl get pods -n ${NAMESPACE}
@@ -2599,7 +3482,7 @@ $( cluster_supports_service_monitor && echo "kubectl get servicemonitor -n ${NAM
 业务影响说明:
 1. addon-install 默认不修改 MySQL StatefulSet
 2. monitoring addon 会额外创建 exporter Deployment
-3. backup addon 会额外创建 CronJob
+${backup_line}
 4. 如需日志 sidecar，请改用 install，并提前评估滚动更新窗口
 EOF
 }

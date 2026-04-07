@@ -11,10 +11,13 @@ DIST_DIR="${ROOT_DIR}/dist"
 IMAGE_JSON="${IMAGES_DIR}/image.json"
 ASSEMBLER="${ROOT_DIR}/scripts/assemble-install.sh"
 INSTALL_MODULE_ROOT="${ROOT_DIR}/scripts/install/modules"
+SELECTED_IMAGE_ITEMS_FILE="${TEMP_DIR}/selected-images.jsonl"
 
 ARCH="amd64"
 PLATFORM="linux/amd64"
-BUILD_ALL="false"
+BUILD_ALL_ARCH="false"
+PROFILE="integrated"
+BUILD_ALL_PROFILES="false"
 INSTALLER_NAME=""
 
 RED='\033[0;31m'
@@ -44,12 +47,12 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  ./build.sh [--arch amd64|arm64|all]
+  ./build.sh [--arch amd64|arm64|all] [--profile integrated|backup-restore|benchmark|monitoring|all]
 
 Examples:
-  ./build.sh --arch amd64
-  ./build.sh --arch arm64
-  ./build.sh --arch all
+  ./build.sh --arch amd64 --profile integrated
+  ./build.sh --arch arm64 --profile benchmark
+  ./build.sh --arch all --profile all
 EOF
 }
 
@@ -58,22 +61,56 @@ normalize_arch() {
     amd64|amd|x86_64)
       ARCH="amd64"
       PLATFORM="linux/amd64"
-      BUILD_ALL="false"
+      BUILD_ALL_ARCH="false"
       ;;
     arm64|arm|aarch64)
       ARCH="arm64"
       PLATFORM="linux/arm64"
-      BUILD_ALL="false"
+      BUILD_ALL_ARCH="false"
       ;;
     all)
-      BUILD_ALL="true"
+      BUILD_ALL_ARCH="true"
       ;;
     *)
       die "Unsupported arch: $1"
       ;;
   esac
+}
 
-  INSTALLER_NAME="mysql-installer-${ARCH}.run"
+normalize_profile() {
+  case "$1" in
+    integrated|backup-restore|benchmark|monitoring)
+      PROFILE="$1"
+      BUILD_ALL_PROFILES="false"
+      ;;
+    all)
+      BUILD_ALL_PROFILES="true"
+      ;;
+    *)
+      die "Unsupported profile: $1"
+      ;;
+  esac
+}
+
+profile_installer_basename() {
+  case "${PROFILE}" in
+    integrated)
+      echo "mysql-installer"
+      ;;
+    backup-restore)
+      echo "mysql-backup-restore"
+      ;;
+    benchmark)
+      echo "mysql-benchmark"
+      ;;
+    monitoring)
+      echo "mysql-monitoring"
+      ;;
+  esac
+}
+
+refresh_installer_name() {
+  INSTALLER_NAME="$(profile_installer_basename)-${ARCH}.run"
 }
 
 parse_args() {
@@ -82,6 +119,11 @@ parse_args() {
       --arch|-a)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         normalize_arch "$2"
+        shift 2
+        ;;
+      --profile|-p)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        normalize_profile "$2"
         shift 2
         ;;
       -h|--help)
@@ -116,15 +158,62 @@ assemble_installer() {
 prepare_directories() {
   rm -rf "${TEMP_DIR}" "${PAYLOAD_FILE}"
   mkdir -p "${TEMP_DIR}/images" "${TEMP_DIR}/manifests" "${DIST_DIR}"
+  : > "${SELECTED_IMAGE_ITEMS_FILE}"
+}
+
+profile_needs_image_tag() {
+  local image_tag="$1"
+
+  case "${PROFILE}" in
+    integrated)
+      return 0
+      ;;
+    backup-restore)
+      [[ "${image_tag}" == */mysql:* || "${image_tag}" == */minio-mc:* ]]
+      return
+      ;;
+    benchmark)
+      [[ "${image_tag}" == */mysql:* || "${image_tag}" == */sysbench:* ]]
+      return
+      ;;
+    monitoring)
+      [[ "${image_tag}" == */mysql:* || "${image_tag}" == */mysqld-exporter:* ]]
+      return
+      ;;
+  esac
+
+  return 1
+}
+
+profile_needs_manifest() {
+  local manifest_name="$1"
+
+  case "${PROFILE}" in
+    integrated)
+      return 0
+      ;;
+    backup-restore)
+      case "${manifest_name}" in
+        mysql-backup-support.yaml|mysql-backup.yaml|mysql-backup-job.yaml|mysql-restore-job.yaml)
+          return 0
+          ;;
+      esac
+      ;;
+    benchmark)
+      [[ "${manifest_name}" == "mysql-benchmark-job.yaml" ]]
+      return
+      ;;
+    monitoring)
+      [[ "${manifest_name}" == "mysql-addon-monitoring.yaml" ]]
+      return
+      ;;
+  esac
+
+  return 1
 }
 
 prepare_images() {
-  local count
-  count="$(jq --arg arch "${ARCH}" '[.[] | select(.arch == $arch)] | length' "${IMAGE_JSON}")"
-  [[ "${count}" -gt 0 ]] || die "No image definition found for arch=${ARCH}"
-
-  log "Preparing ${count} image(s) for ${ARCH}"
-
+  local count=0
   while IFS= read -r item; do
     [[ -n "${item}" ]] || continue
 
@@ -135,6 +224,8 @@ prepare_images() {
     platform="$(jq -r '.platform // empty' <<<"${item}")"
     dockerfile="$(jq -r '.dockerfile // empty' <<<"${item}")"
     [[ -n "${platform}" ]] || platform="${PLATFORM}"
+
+    profile_needs_image_tag "${tag}" || continue
 
     if [[ -n "${dockerfile}" ]]; then
       if docker buildx version >/dev/null 2>&1; then
@@ -159,13 +250,26 @@ prepare_images() {
 
     log "Save ${tag} -> ${TEMP_DIR}/images/${tar_name}"
     docker save -o "${TEMP_DIR}/images/${tar_name}" "${tag}"
+    printf '%s\n' "${item}" >> "${SELECTED_IMAGE_ITEMS_FILE}"
+    count=$((count + 1))
   done < <(jq -c --arg arch "${ARCH}" '.[] | select(.arch == $arch)' "${IMAGE_JSON}")
+
+  (( count > 0 )) || die "No image definition found for arch=${ARCH}, profile=${PROFILE}"
+  success "Prepared ${count} image(s) for arch=${ARCH}, profile=${PROFILE}"
 }
 
 package_payload() {
-  log "Packaging manifests and images"
-  cp -r "${MANIFESTS_DIR}/"* "${TEMP_DIR}/manifests/"
-  cp "${IMAGE_JSON}" "${TEMP_DIR}/images/"
+  local manifest_path manifest_name
+
+  log "Packaging manifests and images for profile=${PROFILE}"
+  for manifest_path in "${MANIFESTS_DIR}"/*; do
+    [[ -f "${manifest_path}" ]] || continue
+    manifest_name="$(basename "${manifest_path}")"
+    profile_needs_manifest "${manifest_name}" || continue
+    cp "${manifest_path}" "${TEMP_DIR}/manifests/"
+  done
+
+  jq -s '.' "${SELECTED_IMAGE_ITEMS_FILE}" > "${TEMP_DIR}/images/image.json"
 
   (
     cd "${TEMP_DIR}"
@@ -175,9 +279,17 @@ package_payload() {
   tar -tzf "${PAYLOAD_FILE}" >/dev/null 2>&1 || die "Payload verification failed"
 }
 
+prepare_profile_script() {
+  local profile_script="${TEMP_DIR}/install-${PROFILE}.sh"
+  sed "0,/^PACKAGE_PROFILE=.*$/s//PACKAGE_PROFILE=\"${PROFILE}\"/" "${ROOT_DIR}/install.sh" > "${profile_script}"
+  echo "${profile_script}"
+}
+
 build_installer() {
-  local installer_path="${DIST_DIR}/${INSTALLER_NAME}"
-  cat "${ROOT_DIR}/install.sh" "${PAYLOAD_FILE}" > "${installer_path}"
+  local script_source installer_path
+  script_source="$(prepare_profile_script)"
+  installer_path="${DIST_DIR}/${INSTALLER_NAME}"
+  cat "${script_source}" "${PAYLOAD_FILE}" > "${installer_path}"
   chmod +x "${installer_path}"
   sha256sum "${installer_path}" > "${installer_path}.sha256"
   success "Built ${installer_path}"
@@ -190,10 +302,13 @@ cleanup() {
 
 build_one() {
   normalize_arch "$1"
+  normalize_profile "$2"
+  refresh_installer_name
 
   echo -e "${BOLD}MySQL Offline Installer Builder${NC}"
   echo "  arch: ${ARCH}"
   echo "  platform: ${PLATFORM}"
+  echo "  profile: ${PROFILE}"
 
   prepare_directories
   prepare_images
@@ -201,19 +316,34 @@ build_one() {
   build_installer
 }
 
+build_matrix() {
+  local arch profile
+  local -a arches=("${ARCH}")
+  local -a profiles=("${PROFILE}")
+
+  if [[ "${BUILD_ALL_ARCH}" == "true" ]]; then
+    arches=(amd64 arm64)
+  fi
+
+  if [[ "${BUILD_ALL_PROFILES}" == "true" ]]; then
+    profiles=(integrated backup-restore benchmark monitoring)
+  fi
+
+  for arch in "${arches[@]}"; do
+    for profile in "${profiles[@]}"; do
+      build_one "${arch}" "${profile}"
+    done
+  done
+}
+
 main() {
   trap cleanup EXIT
   normalize_arch "${ARCH}"
+  normalize_profile "${PROFILE}"
   parse_args "$@"
   assemble_installer
   check_requirements
-
-  if [[ "${BUILD_ALL}" == "true" ]]; then
-    build_one amd64
-    build_one arm64
-  else
-    build_one "${ARCH}"
-  fi
+  build_matrix
 }
 
 main "$@"
