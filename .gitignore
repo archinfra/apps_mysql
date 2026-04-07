@@ -2,3 +2,4 @@ dist/
 .build-payload/
 payload.tar.gz
 reports/
+operator/data-protection-operator/bin/

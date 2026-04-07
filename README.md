@@ -13,6 +13,19 @@
 
 这样既保留了离线集成交付的优势，也能把压测、备份恢复、监控这些能力抽出来给其他 MySQL 场景复用。
 
+另外，仓库里已经开始孵化一个更通用的 CRD/Operator 方向：
+
+- [Data Protection Operator](C:/Users/yuanyp8/Desktop/archinfra/apps_mysql/operator/data-protection-operator)
+
+它面向的不再只是 MySQL，而是通用的数据保护控制面，目标覆盖：
+
+- MySQL
+- Redis
+- MongoDB
+- MinIO
+- RabbitMQ
+- Milvus
+
 ---
 
 ## 1. 最终方案概览
@@ -393,3 +406,6 @@ chmod +x build.sh install.sh scripts/assemble-install.sh
 - [Addon 说明](docs/ADDONS.zh-CN.md)
 - [测试说明](docs/TESTING.zh-CN.md)
 - [2026-04-07 多中心备份与多产物方案](docs/plans/2026-04-07-mysql-capability-packaging-and-multi-center-backup.md)
+- [Data Protection Operator 开发说明](C:/Users/yuanyp8/Desktop/archinfra/apps_mysql/docs/operator/DEVELOPMENT.zh-CN.md)
+- [Data Protection Operator 环境文档](C:/Users/yuanyp8/Desktop/archinfra/apps_mysql/docs/operator/ENVIRONMENT.zh-CN.md)
+- [Data Protection Operator 架构草案](C:/Users/yuanyp8/Desktop/archinfra/apps_mysql/docs/plans/2026-04-07-data-protection-operator-architecture.md)
