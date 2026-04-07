@@ -8,6 +8,100 @@ docker_login() {
 }
 
 
+payload_signature() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$0" | awk '{print $1}'
+    return 0
+  fi
+
+  cksum "$0" | awk '{print $1 "-" $2}'
+}
+
+
+payload_start_offset() {
+  if [[ -n "${PAYLOAD_OFFSET:-}" ]]; then
+    printf '%s' "${PAYLOAD_OFFSET}"
+    return 0
+  fi
+
+  local marker_line payload_offset skip_bytes byte_hex
+  marker_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR; exit }' "$0")"
+  [[ -n "${marker_line}" ]] || die "未找到载荷标记"
+  payload_offset="$(( $(head -n "${marker_line}" "$0" | wc -c | tr -d ' ') + 1 ))"
+
+  skip_bytes=0
+  while :; do
+    byte_hex="$(dd if="$0" bs=1 skip="$((payload_offset + skip_bytes - 1))" count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "${byte_hex}" in
+      0a|0d)
+        skip_bytes=$((skip_bytes + 1))
+        ;;
+      "")
+        die "载荷边界异常，未找到有效的压缩数据"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  PAYLOAD_OFFSET="$((payload_offset + skip_bytes))"
+  printf '%s' "${PAYLOAD_OFFSET}"
+}
+
+
+payload_extract_entries() {
+  local destination="$1"
+  shift
+
+  local payload_offset
+  payload_offset="$(payload_start_offset)"
+  tail -c +"${payload_offset}" "$0" | tar -xz -C "${destination}" "$@" >/dev/null 2>&1
+}
+
+
+payload_signature_file() {
+  printf '%s/.payload-signature' "${WORKDIR}"
+}
+
+
+payload_cache_ready() {
+  local expected_signature="$1"
+  local signature_file
+  signature_file="$(payload_signature_file)"
+
+  [[ -f "${signature_file}" ]] || return 1
+  [[ "$(cat "${signature_file}")" == "${expected_signature}" ]] || return 1
+  [[ -f "${MYSQL_MANIFEST}" ]] || return 1
+  [[ -f "${BACKUP_MANIFEST}" ]] || return 1
+  [[ -f "${BACKUP_SUPPORT_MANIFEST}" ]] || return 1
+  [[ -f "${BACKUP_JOB_MANIFEST}" ]] || return 1
+  [[ -f "${RESTORE_MANIFEST}" ]] || return 1
+  [[ -f "${BENCHMARK_MANIFEST}" ]] || return 1
+  [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || return 1
+  [[ -f "${IMAGE_JSON}" ]] || return 1
+}
+
+
+ensure_image_archive_available() {
+  local tar_name="$1"
+  local tar_path="${IMAGE_DIR}/${tar_name}"
+
+  if [[ -f "${tar_path}" ]]; then
+    return 0
+  fi
+
+  log "按需解压镜像归档 ${tar_name}"
+  payload_extract_entries "${WORKDIR}" "./images/${tar_name}" || die "解压镜像归档失败: ${tar_name}"
+  [[ -f "${tar_path}" ]] || die "解压后仍未找到镜像归档: ${tar_name}"
+}
+
+
+docker_image_exists() {
+  docker image inspect "$1" >/dev/null 2>&1
+}
+
+
 resolve_target_image_tag() {
   local source_tag="$1"
   local suffix="${source_tag#*/kube4/}"
@@ -39,14 +133,24 @@ prepare_images() {
     tar_path="${IMAGE_DIR}/${tar_name}"
 
     image_needed_for_current_action "${image_tag}" || continue
-    [[ -f "${tar_path}" ]] || continue
 
-    log "导入镜像归档 ${tar_name}"
-    docker load -i "${tar_path}" >/dev/null
-    if [[ "${target_tag}" != "${image_tag}" ]]; then
-      log "重打标签 ${image_tag} -> ${target_tag}"
-      docker tag "${image_tag}" "${target_tag}"
+    if docker_image_exists "${target_tag}"; then
+      log "复用本地镜像 ${target_tag}"
+    else
+      if docker_image_exists "${image_tag}"; then
+        log "复用本地镜像 ${image_tag}"
+      else
+        ensure_image_archive_available "${tar_name}"
+        log "导入镜像归档 ${tar_name}"
+        docker load -i "${tar_path}" >/dev/null
+      fi
+
+      if [[ "${target_tag}" != "${image_tag}" ]]; then
+        log "重打标签 ${image_tag} -> ${target_tag}"
+        docker tag "${image_tag}" "${target_tag}"
+      fi
     fi
+
     log "推送镜像 ${target_tag}"
     docker push "${target_tag}" >/dev/null
     count=$((count + 1))
@@ -151,32 +255,20 @@ cleanup_disabled_optional_resources() {
 
 extract_payload() {
   section "解压安装载荷"
+  local expected_signature signature_file
+  expected_signature="$(payload_signature)"
+  signature_file="$(payload_signature_file)"
+
+  if payload_cache_ready "${expected_signature}"; then
+    success "复用已解压载荷缓存"
+    return 0
+  fi
+
   rm -rf "${WORKDIR}"
   mkdir -p "${WORKDIR}" "${IMAGE_DIR}" "${MANIFEST_DIR}"
 
-  local marker_line payload_offset skip_bytes byte_hex
-  marker_line="$(awk '/^__PAYLOAD_BELOW__$/ { print NR; exit }' "$0")"
-  [[ -n "${marker_line}" ]] || die "未找到载荷标记"
-  payload_offset="$(( $(head -n "${marker_line}" "$0" | wc -c | tr -d ' ') + 1 ))"
-
-  skip_bytes=0
-  while :; do
-    byte_hex="$(dd if="$0" bs=1 skip="$((payload_offset + skip_bytes - 1))" count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    case "${byte_hex}" in
-      0a|0d)
-        skip_bytes=$((skip_bytes + 1))
-        ;;
-      "")
-        die "载荷边界异常，未找到有效的压缩数据"
-        ;;
-      *)
-        break
-        ;;
-    esac
-  done
-
-  log "正在解压到 ${WORKDIR}"
-  tail -c +"$((payload_offset + skip_bytes))" "$0" | tar -xz -C "${WORKDIR}" >/dev/null 2>&1 || die "解压载荷失败"
+  log "正在解压元数据到 ${WORKDIR}"
+  payload_extract_entries "${WORKDIR}" "./manifests" "./images/image.json" || die "解压载荷元数据失败"
 
   [[ -f "${MYSQL_MANIFEST}" ]] || die "缺少 MySQL manifest"
   [[ -f "${BACKUP_MANIFEST}" ]] || die "缺少 backup cronjob manifest"
@@ -186,7 +278,9 @@ extract_payload() {
   [[ -f "${BENCHMARK_MANIFEST}" ]] || die "缺少 benchmark manifest"
   [[ -f "${MONITORING_ADDON_MANIFEST}" ]] || die "缺少 monitoring addon manifest"
   [[ -f "${IMAGE_JSON}" ]] || die "缺少 image.json"
-  success "载荷解压完成"
+
+  printf '%s\n' "${expected_signature}" > "${signature_file}"
+  success "载荷元数据解压完成"
 }
 
 
@@ -326,4 +420,3 @@ apply_restore_job() {
 apply_benchmark_job() {
   render_manifest "${BENCHMARK_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
-
