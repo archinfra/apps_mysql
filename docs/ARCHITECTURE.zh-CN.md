@@ -67,6 +67,11 @@ flowchart TD
 6. 保留策略 `retention`
 7. 导出范围 `all | databases | tables`
 
+plan 的输入方式支持两种：
+
+1. 命令行重复传 `--backup-plan`
+2. 用 `--backup-plan-file` 从 YAML/JSON 批量加载
+
 ### 4.2 多中心
 
 由此自然支持：
@@ -74,8 +79,9 @@ flowchart TD
 1. 多个 NFS
 2. 多个 MinIO / S3
 3. NFS + S3 混合
-4. 主计划 + 额外计划
-5. 关闭默认主计划，只保留显式定义计划
+4. 一个计划对应一个独立 CronJob
+5. 主计划 + 额外计划
+6. 关闭默认主计划，只保留显式定义计划
 
 ### 4.3 部分导出
 

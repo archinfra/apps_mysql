@@ -126,6 +126,7 @@ main() {
   fi
 
   resolve_feature_dependencies
+  needs_backup_storage && load_backup_plan_file_if_requested
   prompt_missing_values
   validate_environment
   validate_inputs

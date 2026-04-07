@@ -70,8 +70,11 @@ BACKUP_PLAN_NAME="primary"
 BACKUP_STORE_NAME="primary"
 BACKUP_DATABASES=""
 BACKUP_TABLES=""
+BACKUP_PLAN_FILE=""
 BACKUP_RESTORE_SOURCE="auto"
+BACKUP_RESTORE_SOURCE_EXPLICIT="false"
 BACKUP_DEFAULT_PLAN_ENABLED="true"
+BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="false"
 NODEPORT_SERVICE_NAME="mysql-nodeport"
 NODE_PORT="30306"
 NODEPORT_ENABLED="true"
@@ -274,7 +277,9 @@ install 仅在 integrated 包中可用，适合:
   --enable-backup / --disable-backup
   --backup-backend nfs|s3           默认主计划后端
   --backup-store-name <name>        默认主计划存储名，默认: primary
+  --backup-plan-file <path>         从 YAML/JSON 加载备份计划
   --backup-plan '<spec>'            追加一个额外备份计划，可重复传入
+  --enable-default-backup-plan
   --disable-default-backup-plan     仅保留显式定义的 backup plan
 
 说明:
@@ -286,10 +291,7 @@ install 仅在 integrated 包中可用，适合:
   ${cmd} install \\
     --namespace mysql-demo \\
     --root-password 'StrongPassw0rd' \\
-    --backup-backend nfs \\
-    --backup-nfs-server 192.168.10.2 \\
-    --backup-nfs-path /data/nfs-a \\
-    --backup-plan 'name=dc2-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=0 3 * * *;retention=7' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 EOF
 }
@@ -377,7 +379,9 @@ show_help_backup() {
   --backup-retention <num>          默认: 5
   --backup-databases <db1,db2>      只导出指定库
   --backup-tables <db.tbl,...>      只导出指定表
+  --backup-plan-file <path>         从 YAML/JSON 批量加载计划
   --backup-plan '<spec>'            增加额外计划，可重复传入
+  --enable-default-backup-plan      显式保留默认主计划
   --disable-default-backup-plan     不再使用顶层主计划
 
 NFS 计划字段:
@@ -390,6 +394,14 @@ S3 计划字段:
   databases=db1,db2
   tables=db1.t1,db2.t2
 
+配置文件:
+  推荐把长期计划写入 YAML/JSON，再通过 --backup-plan-file 引入。
+  文件支持:
+    defaultPlanEnabled: true|false
+    restoreSource: auto|<plan-name>
+    defaults: {...}
+    plans: [...]
+
 认证要求:
   1. backup / restore / verify-backup-restore 不再回退到 --root-password。
   2. 请显式提供 --mysql-password，或提供可用的 --mysql-auth-secret。
@@ -400,9 +412,7 @@ S3 计划字段:
     --mysql-host 10.0.0.20 \\
     --mysql-user root \\
     --mysql-password '<MYSQL_PASSWORD>' \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=orders-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;databases=orders,inventory;retention=7' \\
-    --backup-plan 'name=orders-audit;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 EOF
 }
@@ -425,6 +435,7 @@ restore 用于从备份快照恢复 MySQL。
   --restore-snapshot <name|latest>  默认: latest
   --restore-source <plan-name|auto> 默认: auto，按 backup plan 顺序尝试
   --restore-mode merge|wipe-all-user-databases 默认: merge
+  --backup-plan-file <path>         从 YAML/JSON 加载备份来源定义
 
 说明:
   1. latest 会优先读取 latest.txt。
@@ -441,8 +452,7 @@ restore 用于从备份快照恢复 MySQL。
     --restore-source dc2-s3 \\
     --restore-snapshot latest \\
     --restore-mode merge \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=dc2-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 EOF
 }
@@ -537,7 +547,9 @@ MySQL 目标连接:
   --backup-retention <num>
   --backup-databases <db1,db2>
   --backup-tables <db.tbl,...>
+  --backup-plan-file <path>
   --backup-plan '<spec>'
+  --enable-default-backup-plan
   --disable-default-backup-plan
   --restore-source <plan-name|auto>
   --restore-snapshot <name|latest>
@@ -577,8 +589,9 @@ show_help_backup_restore() {
 
 多中心设计:
   1. 一个 backup plan 对应一个存储目的地和一条调度策略
-  2. 可以有多个 NFS、多个 S3，也可以 NFS + S3 混搭
-  3. 默认计划继续兼容旧参数，额外中心通过重复 --backup-plan 叠加
+  2. 一个定时 backup plan 就会生成一个独立 CronJob
+  3. 可以有多个 NFS、多个 S3，也可以 NFS + S3 混搭
+  4. 默认计划继续兼容旧参数，额外中心通过重复 --backup-plan 或 --backup-plan-file 叠加
 
 路径规则:
   NFS:
@@ -685,10 +698,7 @@ show_help_examples() {
   ./mysql-installer-<arch>.run install \\
     --namespace mysql-demo \\
     --root-password 'StrongPassw0rd' \\
-    --backup-backend nfs \\
-    --backup-nfs-server 192.168.10.2 \\
-    --backup-nfs-path /data/nfs-a \\
-    --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=7' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 只给已有 MySQL 补多中心定时备份:
@@ -698,10 +708,7 @@ show_help_examples() {
     --mysql-host 10.0.0.20 \\
     --mysql-user root \\
     --mysql-password '<MYSQL_PASSWORD>' \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \\
-    --backup-plan 'name=nfs-b;backend=nfs;nfsServer=192.168.20.2;nfsPath=/data/nfs-b;schedule=10 2 * * *;retention=7;databases=orders,inventory' \\
-    --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=20 2 * * *;retention=30;tables=orders.audit_log,orders.audit_event' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 立刻导出指定表到多中心:
@@ -710,9 +717,7 @@ show_help_examples() {
     --mysql-host 10.0.0.20 \\
     --mysql-user root \\
     --mysql-password '<MYSQL_PASSWORD>' \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=audit-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;tables=orders.audit_log,orders.audit_event;retention=7' \\
-    --backup-plan 'name=audit-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 从指定中心恢复:
@@ -724,8 +729,7 @@ show_help_examples() {
     --restore-source minio-c \\
     --restore-snapshot latest \\
     --restore-mode merge \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 独立压测:
@@ -1108,8 +1112,18 @@ parse_args() {
         BACKUP_PLAN_EXTRA_SPECS+=("$2")
         shift 2
         ;;
+      --backup-plan-file)
+        BACKUP_PLAN_FILE="$2"
+        shift 2
+        ;;
+      --enable-default-backup-plan)
+        BACKUP_DEFAULT_PLAN_ENABLED="true"
+        BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="true"
+        shift
+        ;;
       --disable-default-backup-plan)
         BACKUP_DEFAULT_PLAN_ENABLED="false"
+        BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="true"
         shift
         ;;
       --s3-endpoint)
@@ -1159,6 +1173,7 @@ parse_args() {
         ;;
       --restore-source)
         BACKUP_RESTORE_SOURCE="$2"
+        BACKUP_RESTORE_SOURCE_EXPLICIT="true"
         shift 2
         ;;
       --wait-timeout)
@@ -1483,6 +1498,347 @@ normalize_csv_list() {
   done
 
   (IFS=,; printf '%s' "${normalized[*]}")
+}
+
+
+backup_plan_parser_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return 0
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    echo "python"
+    return 0
+  fi
+
+  return 1
+}
+
+
+backup_plan_file_parse_lines() {
+  local config_path="$1"
+  local python_cmd
+
+  python_cmd="$(backup_plan_parser_python)" || die "使用 --backup-plan-file 需要 python3 或 python"
+  "${python_cmd}" - "${config_path}" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import sys
+
+
+def strip_comments(line: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    result = []
+
+    for ch in line:
+        if escaped:
+            result.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            result.append(ch)
+            escaped = True
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            result.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(ch)
+            continue
+        if ch == "#" and not in_single and not in_double:
+            break
+        result.append(ch)
+
+    return "".join(result).rstrip()
+
+
+def parse_scalar(value: str):
+    raw = value.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1]
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in ("null", "none"):
+        return None
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    return raw
+
+
+def parse_key_value(text: str):
+    if ":" not in text:
+        raise ValueError(f"invalid line: {text}")
+    key, value = text.split(":", 1)
+    return key.strip(), value.strip()
+
+
+def parse_yaml(text: str):
+    prepared = []
+    for raw in text.splitlines():
+        cleaned = strip_comments(raw)
+        if not cleaned.strip():
+            continue
+        indent = len(cleaned) - len(cleaned.lstrip(" "))
+        if indent % 2:
+            raise ValueError("YAML indentation must use multiples of 2 spaces")
+        prepared.append((indent, cleaned.lstrip()))
+
+    def parse_scalar_map(start_index: int, indent: int):
+        mapping = {}
+        index = start_index
+        while index < len(prepared):
+            current_indent, content = prepared[index]
+            if current_indent < indent:
+                break
+            if current_indent != indent or content.startswith("- "):
+                raise ValueError(f"invalid map entry near: {content}")
+
+            key, rest = parse_key_value(content)
+            index += 1
+            if rest:
+              mapping[key] = parse_scalar(rest)
+              continue
+
+            items = []
+            while index < len(prepared):
+                child_indent, child_content = prepared[index]
+                if child_indent < indent + 2:
+                    break
+                if child_indent != indent + 2 or not child_content.startswith("- "):
+                    raise ValueError(f"expected list item for {key}")
+                items.append(parse_scalar(child_content[2:].strip()))
+                index += 1
+            mapping[key] = items
+
+        return mapping, index
+
+    def parse_plan_list(start_index: int, indent: int):
+        plans = []
+        index = start_index
+        while index < len(prepared):
+            current_indent, content = prepared[index]
+            if current_indent < indent:
+                break
+            if current_indent != indent or not content.startswith("- "):
+                raise ValueError(f"invalid plan entry near: {content}")
+
+            item = {}
+            inline = content[2:].strip()
+            if inline:
+                key, rest = parse_key_value(inline)
+                item[key] = parse_scalar(rest)
+            index += 1
+
+            while index < len(prepared):
+                child_indent, child_content = prepared[index]
+                if child_indent <= indent:
+                    break
+                if child_indent != indent + 2:
+                    raise ValueError(f"invalid plan child near: {child_content}")
+
+                key, rest = parse_key_value(child_content)
+                index += 1
+                if rest:
+                    item[key] = parse_scalar(rest)
+                    continue
+
+                values = []
+                while index < len(prepared):
+                    list_indent, list_content = prepared[index]
+                    if list_indent < indent + 4:
+                        break
+                    if list_indent != indent + 4 or not list_content.startswith("- "):
+                        raise ValueError(f"expected list entry for {key}")
+                    values.append(parse_scalar(list_content[2:].strip()))
+                    index += 1
+                item[key] = values
+
+            plans.append(item)
+
+        return plans, index
+
+    data = {}
+    index = 0
+    while index < len(prepared):
+        indent, content = prepared[index]
+        if indent != 0:
+            raise ValueError(f"invalid top-level entry near: {content}")
+        key, rest = parse_key_value(content)
+        index += 1
+        if rest:
+            data[key] = parse_scalar(rest)
+            continue
+
+        if key in ("plans", "backupPlans"):
+            plans, index = parse_plan_list(index, 2)
+            data["plans"] = plans
+        elif key == "defaults":
+            defaults, index = parse_scalar_map(index, 2)
+            data["defaults"] = defaults
+        elif key == "defaultPlan":
+            default_plan, index = parse_scalar_map(index, 2)
+            data["defaultPlan"] = default_plan
+        else:
+            raise ValueError(f"unsupported YAML section: {key}")
+
+    return data
+
+
+def ensure_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def normalize_scalar(value):
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def normalize_list(value):
+    items = []
+    for item in ensure_list(value):
+        item_text = normalize_scalar(item).strip()
+        if item_text:
+            items.append(item_text)
+    return ",".join(items)
+
+
+def load_config(path: pathlib.Path):
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+
+    if suffix == ".json":
+        return json.loads(text)
+
+    if suffix in (".yaml", ".yml"):
+        return parse_yaml(text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return parse_yaml(text)
+
+
+def serialize_plan(plan: dict) -> str:
+    field_order = [
+        "name",
+        "storeName",
+        "backend",
+        "rootDir",
+        "schedule",
+        "retention",
+        "nfsServer",
+        "nfsPath",
+        "s3Endpoint",
+        "s3Bucket",
+        "s3Prefix",
+        "s3AccessKey",
+        "s3SecretKey",
+        "s3Insecure",
+        "databases",
+        "tables",
+    ]
+
+    encoded = []
+    for key in field_order:
+        value = plan.get(key)
+        if key in ("databases", "tables"):
+            encoded.append(f"{key}={normalize_list(value)}")
+        else:
+            encoded.append(f"{key}={normalize_scalar(value)}")
+    return ";".join(encoded)
+
+
+config_path = pathlib.Path(sys.argv[1])
+config = load_config(config_path)
+if not isinstance(config, dict):
+    raise SystemExit("backup plan file root must be an object")
+
+defaults = config.get("defaults") or {}
+if defaults and not isinstance(defaults, dict):
+    raise SystemExit("defaults must be an object")
+
+default_plan = config.get("defaultPlan") or {}
+if default_plan and not isinstance(default_plan, dict):
+    raise SystemExit("defaultPlan must be an object")
+
+default_plan_enabled = config.get("defaultPlanEnabled")
+if default_plan_enabled is None and "enabled" in default_plan:
+    default_plan_enabled = default_plan.get("enabled")
+
+restore_source = config.get("restoreSource")
+plans = config.get("plans") or config.get("backupPlans") or []
+if not isinstance(plans, list):
+    raise SystemExit("plans must be a list")
+
+if default_plan_enabled is not None:
+    print(f"meta defaultPlanEnabled {normalize_scalar(default_plan_enabled)}")
+if restore_source is not None:
+    print(f"meta restoreSource {normalize_scalar(restore_source)}")
+
+for raw_plan in plans:
+    if not isinstance(raw_plan, dict):
+        raise SystemExit("each plan must be an object")
+    merged = dict(defaults)
+    merged.update(raw_plan)
+    print("spec " + serialize_plan(merged))
+PY
+}
+
+
+load_backup_plan_file_if_requested() {
+  local config_path line
+  local -a cli_specs=()
+  local -a loaded_specs=()
+
+  [[ -n "${BACKUP_PLAN_FILE}" ]] || return 0
+  [[ -f "${BACKUP_PLAN_FILE}" ]] || die "backup plan file 不存在: ${BACKUP_PLAN_FILE}"
+
+  config_path="${BACKUP_PLAN_FILE}"
+  cli_specs=("${BACKUP_PLAN_EXTRA_SPECS[@]}")
+  BACKUP_PLAN_EXTRA_SPECS=()
+
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ -n "${line}" ]] || continue
+    case "${line}" in
+      meta\ defaultPlanEnabled\ *)
+        if [[ "${BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT}" != "true" ]]; then
+          BACKUP_DEFAULT_PLAN_ENABLED="${line#meta defaultPlanEnabled }"
+        fi
+        ;;
+      meta\ restoreSource\ *)
+        if [[ "${BACKUP_RESTORE_SOURCE_EXPLICIT}" != "true" ]]; then
+          BACKUP_RESTORE_SOURCE="${line#meta restoreSource }"
+        fi
+        ;;
+      spec\ *)
+        loaded_specs+=("${line#spec }")
+        ;;
+      *)
+        die "无法识别 backup plan file 输出: ${line}"
+        ;;
+    esac
+  done < <(backup_plan_file_parse_lines "${config_path}")
+
+  BACKUP_PLAN_EXTRA_SPECS=("${loaded_specs[@]}" "${cli_specs[@]}")
 }
 
 
@@ -2049,6 +2405,7 @@ validate_environment() {
 
 validate_inputs() {
   [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 仅支持 true 或 false"
+  [[ "${BACKUP_DEFAULT_PLAN_ENABLED}" =~ ^(true|false)$ ]] || die "default backup plan 开关仅支持 true 或 false"
 
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
@@ -2192,6 +2549,9 @@ print_plan() {
   esac
 
   if needs_backup_storage; then
+    if [[ -n "${BACKUP_PLAN_FILE}" ]]; then
+      echo "backup plan file         : ${BACKUP_PLAN_FILE}"
+    fi
     echo "backup plans            : ${#BACKUP_PLAN_CATALOG[@]}"
     backup_plan_summary_lines
     if [[ "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" ]]; then
@@ -3505,6 +3865,7 @@ main() {
   fi
 
   resolve_feature_dependencies
+  needs_backup_storage && load_backup_plan_file_if_requested
   prompt_missing_values
   validate_environment
   validate_inputs

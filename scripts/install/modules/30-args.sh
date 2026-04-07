@@ -216,8 +216,18 @@ parse_args() {
         BACKUP_PLAN_EXTRA_SPECS+=("$2")
         shift 2
         ;;
+      --backup-plan-file)
+        BACKUP_PLAN_FILE="$2"
+        shift 2
+        ;;
+      --enable-default-backup-plan)
+        BACKUP_DEFAULT_PLAN_ENABLED="true"
+        BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="true"
+        shift
+        ;;
       --disable-default-backup-plan)
         BACKUP_DEFAULT_PLAN_ENABLED="false"
+        BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="true"
         shift
         ;;
       --s3-endpoint)
@@ -267,6 +277,7 @@ parse_args() {
         ;;
       --restore-source)
         BACKUP_RESTORE_SOURCE="$2"
+        BACKUP_RESTORE_SOURCE_EXPLICIT="true"
         shift 2
         ;;
       --wait-timeout)

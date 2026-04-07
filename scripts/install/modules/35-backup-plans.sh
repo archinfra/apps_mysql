@@ -23,6 +23,347 @@ normalize_csv_list() {
 }
 
 
+backup_plan_parser_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return 0
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    echo "python"
+    return 0
+  fi
+
+  return 1
+}
+
+
+backup_plan_file_parse_lines() {
+  local config_path="$1"
+  local python_cmd
+
+  python_cmd="$(backup_plan_parser_python)" || die "使用 --backup-plan-file 需要 python3 或 python"
+  "${python_cmd}" - "${config_path}" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import sys
+
+
+def strip_comments(line: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    result = []
+
+    for ch in line:
+        if escaped:
+            result.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            result.append(ch)
+            escaped = True
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            result.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(ch)
+            continue
+        if ch == "#" and not in_single and not in_double:
+            break
+        result.append(ch)
+
+    return "".join(result).rstrip()
+
+
+def parse_scalar(value: str):
+    raw = value.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1]
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in ("null", "none"):
+        return None
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    return raw
+
+
+def parse_key_value(text: str):
+    if ":" not in text:
+        raise ValueError(f"invalid line: {text}")
+    key, value = text.split(":", 1)
+    return key.strip(), value.strip()
+
+
+def parse_yaml(text: str):
+    prepared = []
+    for raw in text.splitlines():
+        cleaned = strip_comments(raw)
+        if not cleaned.strip():
+            continue
+        indent = len(cleaned) - len(cleaned.lstrip(" "))
+        if indent % 2:
+            raise ValueError("YAML indentation must use multiples of 2 spaces")
+        prepared.append((indent, cleaned.lstrip()))
+
+    def parse_scalar_map(start_index: int, indent: int):
+        mapping = {}
+        index = start_index
+        while index < len(prepared):
+            current_indent, content = prepared[index]
+            if current_indent < indent:
+                break
+            if current_indent != indent or content.startswith("- "):
+                raise ValueError(f"invalid map entry near: {content}")
+
+            key, rest = parse_key_value(content)
+            index += 1
+            if rest:
+              mapping[key] = parse_scalar(rest)
+              continue
+
+            items = []
+            while index < len(prepared):
+                child_indent, child_content = prepared[index]
+                if child_indent < indent + 2:
+                    break
+                if child_indent != indent + 2 or not child_content.startswith("- "):
+                    raise ValueError(f"expected list item for {key}")
+                items.append(parse_scalar(child_content[2:].strip()))
+                index += 1
+            mapping[key] = items
+
+        return mapping, index
+
+    def parse_plan_list(start_index: int, indent: int):
+        plans = []
+        index = start_index
+        while index < len(prepared):
+            current_indent, content = prepared[index]
+            if current_indent < indent:
+                break
+            if current_indent != indent or not content.startswith("- "):
+                raise ValueError(f"invalid plan entry near: {content}")
+
+            item = {}
+            inline = content[2:].strip()
+            if inline:
+                key, rest = parse_key_value(inline)
+                item[key] = parse_scalar(rest)
+            index += 1
+
+            while index < len(prepared):
+                child_indent, child_content = prepared[index]
+                if child_indent <= indent:
+                    break
+                if child_indent != indent + 2:
+                    raise ValueError(f"invalid plan child near: {child_content}")
+
+                key, rest = parse_key_value(child_content)
+                index += 1
+                if rest:
+                    item[key] = parse_scalar(rest)
+                    continue
+
+                values = []
+                while index < len(prepared):
+                    list_indent, list_content = prepared[index]
+                    if list_indent < indent + 4:
+                        break
+                    if list_indent != indent + 4 or not list_content.startswith("- "):
+                        raise ValueError(f"expected list entry for {key}")
+                    values.append(parse_scalar(list_content[2:].strip()))
+                    index += 1
+                item[key] = values
+
+            plans.append(item)
+
+        return plans, index
+
+    data = {}
+    index = 0
+    while index < len(prepared):
+        indent, content = prepared[index]
+        if indent != 0:
+            raise ValueError(f"invalid top-level entry near: {content}")
+        key, rest = parse_key_value(content)
+        index += 1
+        if rest:
+            data[key] = parse_scalar(rest)
+            continue
+
+        if key in ("plans", "backupPlans"):
+            plans, index = parse_plan_list(index, 2)
+            data["plans"] = plans
+        elif key == "defaults":
+            defaults, index = parse_scalar_map(index, 2)
+            data["defaults"] = defaults
+        elif key == "defaultPlan":
+            default_plan, index = parse_scalar_map(index, 2)
+            data["defaultPlan"] = default_plan
+        else:
+            raise ValueError(f"unsupported YAML section: {key}")
+
+    return data
+
+
+def ensure_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def normalize_scalar(value):
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def normalize_list(value):
+    items = []
+    for item in ensure_list(value):
+        item_text = normalize_scalar(item).strip()
+        if item_text:
+            items.append(item_text)
+    return ",".join(items)
+
+
+def load_config(path: pathlib.Path):
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+
+    if suffix == ".json":
+        return json.loads(text)
+
+    if suffix in (".yaml", ".yml"):
+        return parse_yaml(text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return parse_yaml(text)
+
+
+def serialize_plan(plan: dict) -> str:
+    field_order = [
+        "name",
+        "storeName",
+        "backend",
+        "rootDir",
+        "schedule",
+        "retention",
+        "nfsServer",
+        "nfsPath",
+        "s3Endpoint",
+        "s3Bucket",
+        "s3Prefix",
+        "s3AccessKey",
+        "s3SecretKey",
+        "s3Insecure",
+        "databases",
+        "tables",
+    ]
+
+    encoded = []
+    for key in field_order:
+        value = plan.get(key)
+        if key in ("databases", "tables"):
+            encoded.append(f"{key}={normalize_list(value)}")
+        else:
+            encoded.append(f"{key}={normalize_scalar(value)}")
+    return ";".join(encoded)
+
+
+config_path = pathlib.Path(sys.argv[1])
+config = load_config(config_path)
+if not isinstance(config, dict):
+    raise SystemExit("backup plan file root must be an object")
+
+defaults = config.get("defaults") or {}
+if defaults and not isinstance(defaults, dict):
+    raise SystemExit("defaults must be an object")
+
+default_plan = config.get("defaultPlan") or {}
+if default_plan and not isinstance(default_plan, dict):
+    raise SystemExit("defaultPlan must be an object")
+
+default_plan_enabled = config.get("defaultPlanEnabled")
+if default_plan_enabled is None and "enabled" in default_plan:
+    default_plan_enabled = default_plan.get("enabled")
+
+restore_source = config.get("restoreSource")
+plans = config.get("plans") or config.get("backupPlans") or []
+if not isinstance(plans, list):
+    raise SystemExit("plans must be a list")
+
+if default_plan_enabled is not None:
+    print(f"meta defaultPlanEnabled {normalize_scalar(default_plan_enabled)}")
+if restore_source is not None:
+    print(f"meta restoreSource {normalize_scalar(restore_source)}")
+
+for raw_plan in plans:
+    if not isinstance(raw_plan, dict):
+        raise SystemExit("each plan must be an object")
+    merged = dict(defaults)
+    merged.update(raw_plan)
+    print("spec " + serialize_plan(merged))
+PY
+}
+
+
+load_backup_plan_file_if_requested() {
+  local config_path line
+  local -a cli_specs=()
+  local -a loaded_specs=()
+
+  [[ -n "${BACKUP_PLAN_FILE}" ]] || return 0
+  [[ -f "${BACKUP_PLAN_FILE}" ]] || die "backup plan file 不存在: ${BACKUP_PLAN_FILE}"
+
+  config_path="${BACKUP_PLAN_FILE}"
+  cli_specs=("${BACKUP_PLAN_EXTRA_SPECS[@]}")
+  BACKUP_PLAN_EXTRA_SPECS=()
+
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ -n "${line}" ]] || continue
+    case "${line}" in
+      meta\ defaultPlanEnabled\ *)
+        if [[ "${BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT}" != "true" ]]; then
+          BACKUP_DEFAULT_PLAN_ENABLED="${line#meta defaultPlanEnabled }"
+        fi
+        ;;
+      meta\ restoreSource\ *)
+        if [[ "${BACKUP_RESTORE_SOURCE_EXPLICIT}" != "true" ]]; then
+          BACKUP_RESTORE_SOURCE="${line#meta restoreSource }"
+        fi
+        ;;
+      spec\ *)
+        loaded_specs+=("${line#spec }")
+        ;;
+      *)
+        die "无法识别 backup plan file 输出: ${line}"
+        ;;
+    esac
+  done < <(backup_plan_file_parse_lines "${config_path}")
+
+  BACKUP_PLAN_EXTRA_SPECS=("${loaded_specs[@]}" "${cli_specs[@]}")
+}
+
+
 capture_default_backup_plan_settings() {
   [[ "${BACKUP_PLAN_DEFAULTS_CAPTURED}" == "true" ]] && return 0
 

@@ -44,10 +44,13 @@
 1. 业务库已经在跑
 2. 想加一个或多个异地备份计划
 3. 不希望动 MySQL StatefulSet
+4. 希望把计划长期维护在 YAML/JSON 文件里
 
 ---
 
 ## 3. 同时写到多个 NFS 和多个 MinIO
+
+一个带 `schedule` 的 backup plan 会生成一个独立 CronJob，所以多中心天然就是多 CronJob。
 
 ```bash
 ./dist/mysql-backup-restore-amd64.run addon-install \
@@ -56,11 +59,7 @@
   --mysql-host 10.0.0.20 \
   --mysql-user root \
   --mysql-password '<MYSQL_PASSWORD>' \
-  --disable-default-backup-plan \
-  --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7' \
-  --backup-plan 'name=nfs-b;backend=nfs;nfsServer=192.168.20.2;nfsPath=/data/nfs-b;schedule=5 2 * * *;retention=7' \
-  --backup-plan 'name=minio-a;backend=s3;s3Endpoint=https://minio-a.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=10 2 * * *;retention=30' \
-  --backup-plan 'name=minio-b;backend=s3;s3Endpoint=https://minio-b.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=15 2 * * *;retention=30' \
+  --backup-plan-file ./examples/backup-plans.example.yaml \
   -y
 ```
 
@@ -69,6 +68,7 @@
 1. 需要多地留存
 2. 希望每个中心有独立计划名和调度
 3. 希望统一通过一套命令管理
+4. 希望后续加中心时只改配置文件
 
 ---
 

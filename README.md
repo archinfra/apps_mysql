@@ -44,6 +44,12 @@
 - 同时写入多个存储中心
 - 单独导出某些业务库或某些表
 
+并且：
+
+- 一个带 `schedule` 的 backup plan 就会生成一个独立 CronJob
+- 手工 `backup` 会按计划逐个创建一次性 Job
+- `--backup-plan-file` 支持把长期计划收进 YAML/JSON，便于 Git 化维护
+
 ---
 
 ## 2. 仓库结构
@@ -173,7 +179,7 @@
 
 ### 4.2 额外增加计划
 
-通过重复传入 `--backup-plan '<spec>'` 增加多个中心：
+通过重复传入 `--backup-plan '<spec>'`，或使用 `--backup-plan-file <path>` 增加多个中心：
 
 ```bash
 ./dist/mysql-backup-restore-amd64.run addon-install \
@@ -207,6 +213,13 @@
 - `s3Insecure`
 - `databases`
 - `tables`
+
+推荐长期维护方式：
+
+1. 临时验证时用命令行 `--backup-plan`
+2. 稳定后收敛到 YAML/JSON 文件
+3. 把文件和环境差异一起纳入 Git 管理
+4. 通过 `defaults` 统一公共参数，减少重复
 
 ### 4.3 导出范围
 
@@ -264,9 +277,7 @@ S3 / MinIO：
   --mysql-host 10.0.0.20 \
   --mysql-user root \
   --mysql-password '<MYSQL_PASSWORD>' \
-  --disable-default-backup-plan \
-  --backup-plan 'name=dc1-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \
-  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=30;tables=orders.audit_log,orders.audit_event' \
+  --backup-plan-file ./examples/backup-plans.example.yaml \
   -y
 ```
 
@@ -278,9 +289,7 @@ S3 / MinIO：
   --mysql-host 10.0.0.20 \
   --mysql-user root \
   --mysql-password '<MYSQL_PASSWORD>' \
-  --disable-default-backup-plan \
-  --backup-plan 'name=dc1-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;databases=orders,inventory;retention=7' \
-  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;databases=orders,inventory;retention=30' \
+  --backup-plan-file ./examples/backup-plans.example.yaml \
   -y
 ```
 
@@ -295,10 +304,23 @@ S3 / MinIO：
   --restore-source dc2-minio \
   --restore-snapshot latest \
   --restore-mode merge \
-  --disable-default-backup-plan \
-  --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \
+  --backup-plan-file ./examples/backup-plans.example.yaml \
   -y
 ```
+
+### 5.6 使用配置文件管理长期计划
+
+仓库已附带示例模板：
+
+- [backup-plans.example.yaml](C:/Users/yuanyp8/Desktop/archinfra/apps_mysql/examples/backup-plans.example.yaml)
+- [backup-plans.example.json](C:/Users/yuanyp8/Desktop/archinfra/apps_mysql/examples/backup-plans.example.json)
+
+建议：
+
+1. 每个环境维护一份 `backup-plans.<env>.yaml`
+2. 公共参数放进 `defaults`
+3. 每个中心只保留差异字段
+4. 通过 `restoreSource` 明确默认恢复优先级
 
 ### 5.5 独立压测
 

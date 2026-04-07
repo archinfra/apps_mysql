@@ -95,6 +95,7 @@ validate_environment() {
 
 validate_inputs() {
   [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 仅支持 true 或 false"
+  [[ "${BACKUP_DEFAULT_PLAN_ENABLED}" =~ ^(true|false)$ ]] || die "default backup plan 开关仅支持 true 或 false"
 
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
@@ -238,6 +239,9 @@ print_plan() {
   esac
 
   if needs_backup_storage; then
+    if [[ -n "${BACKUP_PLAN_FILE}" ]]; then
+      echo "backup plan file         : ${BACKUP_PLAN_FILE}"
+    fi
     echo "backup plans            : ${#BACKUP_PLAN_CATALOG[@]}"
     backup_plan_summary_lines
     if [[ "${ACTION}" == "restore" || "${ACTION}" == "verify-backup-restore" ]]; then

@@ -77,7 +77,9 @@ install 仅在 integrated 包中可用，适合:
   --enable-backup / --disable-backup
   --backup-backend nfs|s3           默认主计划后端
   --backup-store-name <name>        默认主计划存储名，默认: primary
+  --backup-plan-file <path>         从 YAML/JSON 加载备份计划
   --backup-plan '<spec>'            追加一个额外备份计划，可重复传入
+  --enable-default-backup-plan
   --disable-default-backup-plan     仅保留显式定义的 backup plan
 
 说明:
@@ -89,10 +91,7 @@ install 仅在 integrated 包中可用，适合:
   ${cmd} install \\
     --namespace mysql-demo \\
     --root-password 'StrongPassw0rd' \\
-    --backup-backend nfs \\
-    --backup-nfs-server 192.168.10.2 \\
-    --backup-nfs-path /data/nfs-a \\
-    --backup-plan 'name=dc2-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=0 3 * * *;retention=7' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 EOF
 }
@@ -180,7 +179,9 @@ show_help_backup() {
   --backup-retention <num>          默认: 5
   --backup-databases <db1,db2>      只导出指定库
   --backup-tables <db.tbl,...>      只导出指定表
+  --backup-plan-file <path>         从 YAML/JSON 批量加载计划
   --backup-plan '<spec>'            增加额外计划，可重复传入
+  --enable-default-backup-plan      显式保留默认主计划
   --disable-default-backup-plan     不再使用顶层主计划
 
 NFS 计划字段:
@@ -193,6 +194,14 @@ S3 计划字段:
   databases=db1,db2
   tables=db1.t1,db2.t2
 
+配置文件:
+  推荐把长期计划写入 YAML/JSON，再通过 --backup-plan-file 引入。
+  文件支持:
+    defaultPlanEnabled: true|false
+    restoreSource: auto|<plan-name>
+    defaults: {...}
+    plans: [...]
+
 认证要求:
   1. backup / restore / verify-backup-restore 不再回退到 --root-password。
   2. 请显式提供 --mysql-password，或提供可用的 --mysql-auth-secret。
@@ -203,9 +212,7 @@ S3 计划字段:
     --mysql-host 10.0.0.20 \\
     --mysql-user root \\
     --mysql-password '<MYSQL_PASSWORD>' \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=orders-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;databases=orders,inventory;retention=7' \\
-    --backup-plan 'name=orders-audit;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 EOF
 }
@@ -228,6 +235,7 @@ restore 用于从备份快照恢复 MySQL。
   --restore-snapshot <name|latest>  默认: latest
   --restore-source <plan-name|auto> 默认: auto，按 backup plan 顺序尝试
   --restore-mode merge|wipe-all-user-databases 默认: merge
+  --backup-plan-file <path>         从 YAML/JSON 加载备份来源定义
 
 说明:
   1. latest 会优先读取 latest.txt。
@@ -244,8 +252,7 @@ restore 用于从备份快照恢复 MySQL。
     --restore-source dc2-s3 \\
     --restore-snapshot latest \\
     --restore-mode merge \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=dc2-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 EOF
 }
@@ -340,7 +347,9 @@ MySQL 目标连接:
   --backup-retention <num>
   --backup-databases <db1,db2>
   --backup-tables <db.tbl,...>
+  --backup-plan-file <path>
   --backup-plan '<spec>'
+  --enable-default-backup-plan
   --disable-default-backup-plan
   --restore-source <plan-name|auto>
   --restore-snapshot <name|latest>
@@ -380,8 +389,9 @@ show_help_backup_restore() {
 
 多中心设计:
   1. 一个 backup plan 对应一个存储目的地和一条调度策略
-  2. 可以有多个 NFS、多个 S3，也可以 NFS + S3 混搭
-  3. 默认计划继续兼容旧参数，额外中心通过重复 --backup-plan 叠加
+  2. 一个定时 backup plan 就会生成一个独立 CronJob
+  3. 可以有多个 NFS、多个 S3，也可以 NFS + S3 混搭
+  4. 默认计划继续兼容旧参数，额外中心通过重复 --backup-plan 或 --backup-plan-file 叠加
 
 路径规则:
   NFS:
@@ -488,10 +498,7 @@ show_help_examples() {
   ./mysql-installer-<arch>.run install \\
     --namespace mysql-demo \\
     --root-password 'StrongPassw0rd' \\
-    --backup-backend nfs \\
-    --backup-nfs-server 192.168.10.2 \\
-    --backup-nfs-path /data/nfs-a \\
-    --backup-plan 'name=dc2-minio;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=7' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 只给已有 MySQL 补多中心定时备份:
@@ -501,10 +508,7 @@ show_help_examples() {
     --mysql-host 10.0.0.20 \\
     --mysql-user root \\
     --mysql-password '<MYSQL_PASSWORD>' \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7;databases=orders,inventory' \\
-    --backup-plan 'name=nfs-b;backend=nfs;nfsServer=192.168.20.2;nfsPath=/data/nfs-b;schedule=10 2 * * *;retention=7;databases=orders,inventory' \\
-    --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=20 2 * * *;retention=30;tables=orders.audit_log,orders.audit_event' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 立刻导出指定表到多中心:
@@ -513,9 +517,7 @@ show_help_examples() {
     --mysql-host 10.0.0.20 \\
     --mysql-user root \\
     --mysql-password '<MYSQL_PASSWORD>' \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=audit-nfs;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;tables=orders.audit_log,orders.audit_event;retention=7' \\
-    --backup-plan 'name=audit-s3;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;tables=orders.audit_log,orders.audit_event;retention=30' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 从指定中心恢复:
@@ -527,8 +529,7 @@ show_help_examples() {
     --restore-source minio-c \\
     --restore-snapshot latest \\
     --restore-mode merge \\
-    --disable-default-backup-plan \\
-    --backup-plan 'name=minio-c;backend=s3;s3Endpoint=https://minio.dc3.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret' \\
+    --backup-plan-file ./examples/backup-plans.example.yaml \\
     -y
 
 独立压测:

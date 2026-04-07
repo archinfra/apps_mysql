@@ -106,10 +106,11 @@
 1. `backup plan` 参数与校验
 2. 多计划 CronJob / 手工 Job / restore-source
 3. 按库 / 按表导出
-4. 局部备份恢复的安全边界
-5. 多 package profile 构建
-6. GitHub Actions 矩阵产物
-7. README 与文档重写
+4. `--backup-plan-file` 的 YAML/JSON 配置文件入口
+5. 局部备份恢复的安全边界
+6. 多 package profile 构建
+7. GitHub Actions 矩阵产物
+8. README 与文档重写
 
 后续可继续演进：
 

@@ -48,9 +48,16 @@ addon 面向“已有 MySQL 补外围能力”。
 
 1. 一个默认主计划
 2. 多个额外 `--backup-plan`
-3. 多个 NFS
-4. 多个 S3 / MinIO
-5. 按库或按表导出
+3. `--backup-plan-file` YAML/JSON 配置文件
+4. 多个 NFS
+5. 多个 S3 / MinIO
+6. 按库或按表导出
+
+其中：
+
+1. 一个带 `schedule` 的 plan 会生成一个独立 CronJob
+2. 一个手工 `backup` 动作会按计划创建多个一次性 Job
+3. 推荐把长期计划写进配置文件，命令行只保留连接参数
 
 会创建：
 
@@ -87,9 +94,7 @@ addon 面向“已有 MySQL 补外围能力”。
   --mysql-host 10.0.0.20 \
   --mysql-user root \
   --mysql-password '<MYSQL_PASSWORD>' \
-  --disable-default-backup-plan \
-  --backup-plan 'name=nfs-a;backend=nfs;nfsServer=192.168.10.2;nfsPath=/data/nfs-a;schedule=0 2 * * *;retention=7' \
-  --backup-plan 'name=minio-a;backend=s3;s3Endpoint=https://minio.dc2.example.com;s3Bucket=mysql-backup;s3Prefix=prod;s3AccessKey=minio;s3SecretKey=secret;schedule=30 2 * * *;retention=30' \
+  --backup-plan-file ./examples/backup-plans.example.yaml \
   -y
 ```
 
