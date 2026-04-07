@@ -95,10 +95,17 @@ spec:
               compat_mode="$(cat /workspace/mysql-compat-mode.txt)"
 
               base_args="--db-driver=mysql --mysql-host=${MYSQL_HOST} --mysql-port=${MYSQL_PORT} --mysql-user=${MYSQL_USER} --mysql-password=${MYSQL_PASSWORD} --mysql-db=${BENCHMARK_DB} --threads=${BENCHMARK_THREADS} --rand-type=${BENCHMARK_RAND_TYPE} --report-interval=10 --histogram=on"
-              common_args="${base_args} --time=${BENCHMARK_TIME} --warmup-time=${BENCHMARK_WARMUP_TIME} --tables=${BENCHMARK_TABLES} --table-size=${BENCHMARK_TABLE_SIZE}"
+              common_args="${base_args} --time=${BENCHMARK_TIME} --tables=${BENCHMARK_TABLES} --table-size=${BENCHMARK_TABLE_SIZE}"
+              run_args="${common_args}"
               compat_args="--db-ps-mode=disable --mysql-storage-engine=innodb"
               if [[ "${version_family}" == "mysql80plus" ]]; then
                 compat_args="${compat_args} --mysql-ignore-errors=all"
+              fi
+
+              if sysbench --help 2>&1 | grep -q -- '--warmup-time'; then
+                run_args="${run_args} --warmup-time=${BENCHMARK_WARMUP_TIME}"
+              else
+                echo "[WARN] sysbench does not support --warmup-time; continuing without built-in warmup timer" | tee -a "${report_file}"
               fi
 
               json_escape() {
@@ -107,6 +114,9 @@ spec:
 
               numeric_or_zero() {
                 local value="${1:-}"
+                if [[ -n "${value}" ]]; then
+                  value="$(printf '%s' "${value}" | sed -E 's/[^0-9.].*$//')"
+                fi
                 if [[ -n "${value}" ]]; then
                   printf '%s' "${value}"
                 else
@@ -312,7 +322,7 @@ spec:
                 local raw_file="/workspace/raw/${profile_label}.log"
 
                 echo "[INFO] running profile=${profile_label}" | tee -a "${report_file}"
-                sysbench ${common_args} ${compat_args} "${script_name}" run | tee "${raw_file}"
+                sysbench ${run_args} ${compat_args} "${script_name}" run | tee "${raw_file}"
                 append_profile_report "${profile_label}" "${raw_file}"
                 append_profile_json "${profile_label}" "${raw_file}"
               }
@@ -334,7 +344,7 @@ spec:
                   return 0
                 fi
 
-                warmup_args="${base_args} --time=${BENCHMARK_WARMUP_TIME} --warmup-time=0 --tables=${BENCHMARK_TABLES} --table-size=${warmup_rows}"
+                warmup_args="${base_args} --time=${BENCHMARK_WARMUP_TIME} --tables=${BENCHMARK_TABLES} --table-size=${warmup_rows}"
                 echo "[INFO] preparing warmup dataset (${warmup_rows} rows/table)" | tee -a "${report_file}"
                 sysbench ${warmup_args} ${compat_args} "${prepare_script}" prepare
                 echo "[INFO] running warmup workload on small dataset" | tee -a "${report_file}"
