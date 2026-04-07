@@ -72,6 +72,13 @@ plan 的输入方式支持两种：
 1. 命令行重复传 `--backup-plan`
 2. 用 `--backup-plan-file` 从 YAML/JSON 批量加载
 
+这里的 YAML/JSON 当前只是“安装器配置文件”，不是 Kubernetes CRD。
+也就是说：
+
+1. 现在不会向集群注册 `MysqlBackupPlanSet`
+2. 现在没有 controller 持续 watch 和 reconcile
+3. 目前仍然是脚本读取配置后生成 CronJob / Job / Secret
+
 ### 4.2 多中心
 
 由此自然支持：

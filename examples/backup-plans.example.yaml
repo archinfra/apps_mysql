@@ -1,5 +1,5 @@
-apiVersion: archinfra.io/v1alpha1
-kind: MysqlBackupPlanSet
+schemaVersion: v1alpha1
+configKind: MysqlBackupPlanSet
 defaultPlanEnabled: false
 restoreSource: auto
 defaults:

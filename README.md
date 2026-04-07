@@ -221,6 +221,12 @@
 3. 把文件和环境差异一起纳入 Git 管理
 4. 通过 `defaults` 统一公共参数，减少重复
 
+注意：
+
+1. 这里的 YAML/JSON 目前只是安装器读取的“本地配置文件 schema”
+2. 不是 Kubernetes CRD，也不是拿去 `kubectl apply` 的集群资源
+3. 我们故意把示例元数据写成 `schemaVersion/configKind`，避免和真正 CRD 混淆
+
 ### 4.3 导出范围
 
 支持三种范围：

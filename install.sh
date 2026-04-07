@@ -396,6 +396,7 @@ S3 计划字段:
 
 配置文件:
   推荐把长期计划写入 YAML/JSON，再通过 --backup-plan-file 引入。
+  这不是 Kubernetes CRD，而是安装器读取的本地配置文件。
   文件支持:
     defaultPlanEnabled: true|false
     restoreSource: auto|<plan-name>
