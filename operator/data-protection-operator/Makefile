@@ -1,7 +1,11 @@
-GO ?= /usr/local/go/bin/go
-GOFMT ?= /usr/local/go/bin/gofmt
+GO ?= $(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
+GOFMT ?= $(shell command -v gofmt 2>/dev/null || echo /usr/local/go/bin/gofmt)
 LOCALBIN ?= $(CURDIR)/bin
+ifeq ($(OS),Windows_NT)
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen.exe
+else
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+endif
 
 .PHONY: all
 all: fmt test
@@ -24,7 +28,7 @@ generate: controller-gen
 
 .PHONY: manifests
 manifests: controller-gen
-	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) crd paths="./api/v1alpha1/..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: test
 test:

@@ -1,15 +1,17 @@
 # Data Protection Operator 环境处理文档
 
-## 1. 当前指定开发机
+## 1. 指定开发机
 
-本轮指定的 controller 开发机是：
+当前指定的 controller Linux 开发机：
 
 - Host: `36.138.61.152`
 - User: `root`
 - Hostname: `hm-test1`
 - OS: `Ubuntu 22.04.4 LTS`
 
-当前已确认机器上已有：
+## 2. 已确认的环境现状
+
+机器上已有：
 
 - `git`
 - `docker`
@@ -17,18 +19,12 @@
 - `make`
 - `gcc`
 
-当前已确认机器上没有直接进 PATH 的 `go`，但存在：
+Go 不在默认 PATH，但可直接使用：
 
 - `/usr/local/go/bin/go`
 - `/usr/local/go/bin/gofmt`
 
-所以当前环境更适合用“补 PATH + 拉工具”的方式，而不是重新装一遍系统包版 Go。
-
----
-
-## 2. 推荐工作目录
-
-建议在开发机上使用：
+## 3. 推荐工作目录
 
 ```bash
 mkdir -p /root/workspace
@@ -38,9 +34,9 @@ git clone https://github.com/archinfra/apps_mysql.git
 cd apps_mysql/operator/data-protection-operator
 ```
 
----
+如果仓库已经存在，直接进入目录更新即可。
 
-## 3. 初始化命令
+## 4. 初始化命令
 
 ```bash
 export PATH=/usr/local/go/bin:$PATH
@@ -48,15 +44,13 @@ cd /root/workspace/apps_mysql/operator/data-protection-operator
 bash hack/bootstrap-dev-env.sh
 ```
 
-脚本会做：
+脚本会：
 
-1. 确保 `go` 在 PATH 中
-2. 安装 `controller-gen` 到本地 `bin/`
-3. 执行 `go mod tidy`
+- 确保 `go` 可执行
+- 安装 `controller-gen`
+- 执行 `go mod tidy`
 
----
-
-## 4. 常用开发命令
+## 5. 常用验证命令
 
 ```bash
 export PATH=/usr/local/go/bin:$PATH
@@ -68,12 +62,21 @@ make test
 make build
 ```
 
----
+## 6. 本轮验证基线
 
-## 5. 当前环境注意点
+当前这套 operator 开发流，至少应保证以下命令稳定通过：
 
-1. Ubuntu 22.04 自带 `apt` 的 `golang-go` 只有 `1.18`，不建议作为 operator 主开发版本。
-2. 当前机器已经有 `/usr/local/go/bin/go`，优先直接使用。
-3. 如果后续要做 `envtest`、`kind`、`kubebuilder`，再单独补工具，不要第一天一次装满。
-4. 当前项目还处于 CRD/operator 孵化阶段，建议先保证 `go test` 和 `make manifests` 跑通。
-5. 这台机器曾出现过 GitHub HTTP/2 clone 异常，因此文档里默认先设 `git config --global http.version HTTP/1.1`。
+- `bash hack/bootstrap-dev-env.sh`
+- `make generate`
+- `make manifests`
+- `make test`
+
+如果只是验证控制面闭环，不要求当前就接真实的业务备份镜像。
+
+## 7. 注意事项
+
+1. `apt install golang-go` 在这台机器上只有 `1.18`，不要作为主开发版本。
+2. 优先补 PATH 使用 `/usr/local/go/bin`。
+3. 机器曾出现过 GitHub HTTP/2 clone 异常，所以建议保留 `git config --global http.version HTTP/1.1`。
+4. Windows 本地与 Linux 远端都可以跑同一份 `Makefile`，但最终仍以 Linux 远端结果为准。
+5. 如果通过压缩包或脚本从 Windows 同步代码到 Linux，请排除本地产物目录 `operator/data-protection-operator/bin/`，避免把 `.exe` 或错误平台的二进制带到远端。

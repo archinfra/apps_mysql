@@ -95,13 +95,17 @@ type VerificationSpec struct {
 }
 
 type ExecutionTemplateSpec struct {
-	RunnerImage        string                      `json:"runnerImage,omitempty"`
-	ServiceAccountName string                      `json:"serviceAccountName,omitempty"`
-	ImagePullPolicy    corev1.PullPolicy           `json:"imagePullPolicy,omitempty"`
-	NodeSelector       map[string]string           `json:"nodeSelector,omitempty"`
-	Tolerations        []corev1.Toleration         `json:"tolerations,omitempty"`
-	Resources          corev1.ResourceRequirements `json:"resources,omitempty"`
-	ExtraEnv           []corev1.EnvVar             `json:"extraEnv,omitempty"`
+	RunnerImage             string                      `json:"runnerImage,omitempty"`
+	ServiceAccountName      string                      `json:"serviceAccountName,omitempty"`
+	ImagePullPolicy         corev1.PullPolicy           `json:"imagePullPolicy,omitempty"`
+	Command                 []string                    `json:"command,omitempty"`
+	Args                    []string                    `json:"args,omitempty"`
+	BackoffLimit            *int32                      `json:"backoffLimit,omitempty"`
+	TTLSecondsAfterFinished *int32                      `json:"ttlSecondsAfterFinished,omitempty"`
+	NodeSelector            map[string]string           `json:"nodeSelector,omitempty"`
+	Tolerations             []corev1.Toleration         `json:"tolerations,omitempty"`
+	Resources               corev1.ResourceRequirements `json:"resources,omitempty"`
+	ExtraEnv                []corev1.EnvVar             `json:"extraEnv,omitempty"`
 }
 
 type DriverConfig struct {

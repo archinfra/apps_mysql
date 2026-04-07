@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"strings"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -30,27 +29,18 @@ func markCondition(conditions *[]metav1.Condition, conditionType string, status 
 func phaseMessage(phase dpv1alpha1.ResourcePhase) string {
 	switch phase {
 	case dpv1alpha1.ResourcePhaseReady:
-		return "resource is accepted by the scaffold controller"
+		return "resource is ready"
 	case dpv1alpha1.ResourcePhaseRunning:
-		return "resource has been accepted and is awaiting execution wiring"
+		return "resource is actively running"
 	case dpv1alpha1.ResourcePhaseSucceeded:
-		return "request completed in the scaffold controller"
+		return "request completed successfully"
 	case dpv1alpha1.ResourcePhaseFailed:
-		return "resource failed validation"
+		return "resource reconciliation failed"
 	case dpv1alpha1.ResourcePhasePaused:
 		return "resource is suspended"
 	default:
 		return "resource is pending reconciliation"
 	}
-}
-
-func sanitizeName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.ReplaceAll(value, "_", "-")
-	value = strings.ReplaceAll(value, ".", "-")
-	value = strings.ReplaceAll(value, "/", "-")
-	value = strings.ReplaceAll(value, " ", "-")
-	return value
 }
 
 func requeueSoon() ctrl.Result {

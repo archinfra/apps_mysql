@@ -80,6 +80,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controllers.BackupSourceReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create BackupSource controller")
+		os.Exit(1)
+	}
+
+	if err = (&controllers.BackupRepositoryReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create BackupRepository controller")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		ctrl.Log.WithName("setup").Error(err, "unable to set up health check")
 		os.Exit(1)

@@ -123,6 +123,17 @@ spec:
                 type: object
               execution:
                 properties:
+                  args:
+                    items:
+                      type: string
+                    type: array
+                  backoffLimit:
+                    format: int32
+                    type: integer
+                  command:
+                    items:
+                      type: string
+                    type: array
                   extraEnv:
                     items:
                       description: EnvVar represents an environment variable present
@@ -352,6 +363,9 @@ spec:
                           type: string
                       type: object
                     type: array
+                  ttlSecondsAfterFinished:
+                    format: int32
+                    type: integer
                 type: object
               repositoryRefs:
                 items:

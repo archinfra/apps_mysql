@@ -9,6 +9,50 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func (s *BackupSourceSpec) ValidateBasic() error {
+	if strings.TrimSpace(string(s.Driver)) == "" {
+		return fmt.Errorf("spec.driver is required")
+	}
+	switch s.Driver {
+	case BackupDriverMySQL, BackupDriverRedis, BackupDriverMongoDB, BackupDriverMinIO, BackupDriverRabbitMQ, BackupDriverMilvus:
+	default:
+		return fmt.Errorf("unsupported spec.driver %q", s.Driver)
+	}
+
+	if s.TargetRef == nil && strings.TrimSpace(s.Endpoint.Host) == "" && s.Endpoint.ServiceRef == nil {
+		return fmt.Errorf("spec.targetRef or spec.endpoint.host/serviceRef is required")
+	}
+
+	return nil
+}
+
+func (s *BackupRepositorySpec) ValidateBasic() error {
+	if strings.TrimSpace(string(s.Type)) == "" {
+		return fmt.Errorf("spec.type is required")
+	}
+
+	switch s.Type {
+	case RepositoryTypeNFS:
+		if s.NFS == nil {
+			return fmt.Errorf("spec.nfs is required when spec.type=nfs")
+		}
+		if strings.TrimSpace(s.NFS.Server) == "" || strings.TrimSpace(s.NFS.Path) == "" {
+			return fmt.Errorf("spec.nfs.server and spec.nfs.path are required")
+		}
+	case RepositoryTypeS3:
+		if s.S3 == nil {
+			return fmt.Errorf("spec.s3 is required when spec.type=s3")
+		}
+		if strings.TrimSpace(s.S3.Endpoint) == "" || strings.TrimSpace(s.S3.Bucket) == "" {
+			return fmt.Errorf("spec.s3.endpoint and spec.s3.bucket are required")
+		}
+	default:
+		return fmt.Errorf("unsupported repository type %q", s.Type)
+	}
+
+	return nil
+}
+
 func (s *BackupPolicySpec) ValidateBasic() error {
 	if strings.TrimSpace(s.SourceRef.Name) == "" {
 		return fmt.Errorf("spec.sourceRef.name is required")
@@ -16,6 +60,9 @@ func (s *BackupPolicySpec) ValidateBasic() error {
 
 	if len(s.RepositoryRefs) == 0 {
 		return fmt.Errorf("spec.repositoryRefs requires at least one repository")
+	}
+	if hasDuplicateLocalObjectReferenceNames(s.RepositoryRefs) {
+		return fmt.Errorf("spec.repositoryRefs contains duplicate repository names")
 	}
 
 	if strings.TrimSpace(s.Schedule.Cron) == "" && !s.Suspend {
@@ -32,6 +79,9 @@ func (s *BackupRunSpec) ValidateBasic() error {
 	if len(s.RepositoryRefs) == 0 && s.PolicyRef == nil {
 		return fmt.Errorf("spec.repositoryRefs or spec.policyRef is required")
 	}
+	if hasDuplicateLocalObjectReferenceNames(s.RepositoryRefs) {
+		return fmt.Errorf("spec.repositoryRefs contains duplicate repository names")
+	}
 	return nil
 }
 
@@ -41,6 +91,16 @@ func (s *RestoreRequestSpec) ValidateBasic() error {
 	}
 	if s.BackupRunRef == nil && strings.TrimSpace(s.Snapshot) == "" {
 		return fmt.Errorf("spec.backupRunRef or spec.snapshot is required")
+	}
+	if s.RepositoryRef != nil && strings.TrimSpace(s.RepositoryRef.Name) == "" {
+		return fmt.Errorf("spec.repositoryRef.name cannot be empty")
+	}
+	if strings.TrimSpace(string(s.Target.Mode)) != "" {
+		switch s.Target.Mode {
+		case RestoreTargetModeInPlace, RestoreTargetModeOutOfPlace:
+		default:
+			return fmt.Errorf("unsupported spec.target.mode %q", s.Target.Mode)
+		}
 	}
 	return nil
 }
@@ -59,17 +119,23 @@ func PredictCronJobNames(policyName string, repositoryRefs []corev1.LocalObjectR
 		if repoName == "" {
 			continue
 		}
-		names = append(names, fmt.Sprintf("%s-%s", sanitizeName(policyName), sanitizeName(repoName)))
+		names = append(names, BuildCronJobName(policyName, repoName))
 	}
 	sort.Strings(names)
 	return names
 }
 
-func sanitizeName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.ReplaceAll(value, "_", "-")
-	value = strings.ReplaceAll(value, ".", "-")
-	value = strings.ReplaceAll(value, "/", "-")
-	value = strings.ReplaceAll(value, " ", "-")
-	return value
+func hasDuplicateLocalObjectReferenceNames(refs []corev1.LocalObjectReference) bool {
+	seen := map[string]struct{}{}
+	for _, ref := range refs {
+		name := strings.TrimSpace(ref.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			return true
+		}
+		seen[name] = struct{}{}
+	}
+	return false
 }
