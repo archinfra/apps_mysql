@@ -197,7 +197,11 @@ func defaultExecutionTemplate(spec dpv1alpha1.ExecutionTemplateSpec) dpv1alpha1.
 	return spec
 }
 
-func buildBackupCronJob(policy *dpv1alpha1.BackupPolicy, source *dpv1alpha1.BackupSource, repository *dpv1alpha1.BackupRepository) *batchv1.CronJob {
+func buildBackupCronJob(policy *dpv1alpha1.BackupPolicy, source *dpv1alpha1.BackupSource, repository *dpv1alpha1.BackupRepository) (*batchv1.CronJob, error) {
+	if useBuiltInMySQLRuntime(source.Spec.Driver, policy.Spec.Execution) {
+		return buildBuiltInMySQLBackupCronJob(policy, source, repository)
+	}
+
 	execution := defaultExecutionTemplate(policy.Spec.Execution)
 	name := dpv1alpha1.BuildCronJobName(policy.Name, repository.Name)
 	suspended := policy.Spec.Suspend || policy.Spec.Schedule.Suspend
@@ -227,17 +231,18 @@ func buildBackupCronJob(policy *dpv1alpha1.BackupPolicy, source *dpv1alpha1.Back
 				Spec: buildJobSpec(execution, labels, buildBackupEnvVars(policy.Name, "", source, repository, policy.Spec.DriverConfig, policy.Spec.Execution.ExtraEnv, "", ""), "scheduled-backup"),
 			},
 		},
-	}
+	}, nil
 }
 
-func buildBackupRunJob(run *dpv1alpha1.BackupRun, policy *dpv1alpha1.BackupPolicy, source *dpv1alpha1.BackupSource, repository *dpv1alpha1.BackupRepository, snapshot string) *batchv1.Job {
+func buildBackupRunJob(run *dpv1alpha1.BackupRun, policy *dpv1alpha1.BackupPolicy, source *dpv1alpha1.BackupSource, repository *dpv1alpha1.BackupRepository, snapshot string) (*batchv1.Job, error) {
 	execution := dpv1alpha1.ExecutionTemplateSpec{}
 	driverConfig := run.Spec.DriverConfig
 	if policy != nil {
 		execution = policy.Spec.Execution
-		if driverConfig == (dpv1alpha1.DriverConfig{}) {
-			driverConfig = policy.Spec.DriverConfig
-		}
+		driverConfig = effectiveDriverConfig(policy.Spec.DriverConfig, run.Spec.DriverConfig)
+	}
+	if useBuiltInMySQLRuntime(source.Spec.Driver, execution) {
+		return buildBuiltInMySQLBackupRunJob(run, policy, source, repository, snapshot)
 	}
 	execution = defaultExecutionTemplate(execution)
 	name := dpv1alpha1.BuildJobName(run.Name, repository.Name)
@@ -258,10 +263,13 @@ func buildBackupRunJob(run *dpv1alpha1.BackupRun, policy *dpv1alpha1.BackupPolic
 			Annotations: annotations,
 		},
 		Spec: buildJobSpec(execution, labels, buildBackupEnvVars("", run.Name, source, repository, driverConfig, execution.ExtraEnv, snapshot, strings.TrimSpace(run.Spec.Reason)), "manual-backup"),
-	}
+	}, nil
 }
 
-func buildRestoreJob(restore *dpv1alpha1.RestoreRequest, backupRun *dpv1alpha1.BackupRun, source *dpv1alpha1.BackupSource, repository *dpv1alpha1.BackupRepository, execution dpv1alpha1.ExecutionTemplateSpec, snapshot string) *batchv1.Job {
+func buildRestoreJob(restore *dpv1alpha1.RestoreRequest, backupRun *dpv1alpha1.BackupRun, source *dpv1alpha1.BackupSource, repository *dpv1alpha1.BackupRepository, execution dpv1alpha1.ExecutionTemplateSpec, snapshot string) (*batchv1.Job, error) {
+	if useBuiltInMySQLRuntime(source.Spec.Driver, execution) {
+		return buildBuiltInMySQLRestoreJob(restore, backupRun, source, repository, execution, snapshot)
+	}
 	execution = defaultExecutionTemplate(execution)
 	name := dpv1alpha1.BuildJobName(restore.Name, "restore")
 	labels := managedResourceLabels("RestoreRequest", restore.Name, "restore", source.Name, repository.Name)
@@ -282,7 +290,7 @@ func buildRestoreJob(restore *dpv1alpha1.RestoreRequest, backupRun *dpv1alpha1.B
 			Annotations: annotations,
 		},
 		Spec: buildJobSpec(execution, labels, buildRestoreEnvVars(restore, backupRun, source, repository, snapshot), "restore"),
-	}
+	}, nil
 }
 
 func buildJobSpec(execution dpv1alpha1.ExecutionTemplateSpec, labels map[string]string, env []corev1.EnvVar, operation string) batchv1.JobSpec {
@@ -646,6 +654,47 @@ func effectiveRestoreTargetMode(mode dpv1alpha1.RestoreTargetMode) dpv1alpha1.Re
 		return dpv1alpha1.RestoreTargetModeInPlace
 	}
 	return mode
+}
+
+func effectiveDriverConfig(base, override dpv1alpha1.DriverConfig) dpv1alpha1.DriverConfig {
+	result := dpv1alpha1.DriverConfig{}
+	switch {
+	case override.MySQL != nil:
+		result.MySQL = override.MySQL.DeepCopy()
+	case base.MySQL != nil:
+		result.MySQL = base.MySQL.DeepCopy()
+	}
+	switch {
+	case override.Redis != nil:
+		result.Redis = override.Redis.DeepCopy()
+	case base.Redis != nil:
+		result.Redis = base.Redis.DeepCopy()
+	}
+	switch {
+	case override.MongoDB != nil:
+		result.MongoDB = override.MongoDB.DeepCopy()
+	case base.MongoDB != nil:
+		result.MongoDB = base.MongoDB.DeepCopy()
+	}
+	switch {
+	case override.MinIO != nil:
+		result.MinIO = override.MinIO.DeepCopy()
+	case base.MinIO != nil:
+		result.MinIO = base.MinIO.DeepCopy()
+	}
+	switch {
+	case override.RabbitMQ != nil:
+		result.RabbitMQ = override.RabbitMQ.DeepCopy()
+	case base.RabbitMQ != nil:
+		result.RabbitMQ = base.RabbitMQ.DeepCopy()
+	}
+	switch {
+	case override.Milvus != nil:
+		result.Milvus = override.Milvus.DeepCopy()
+	case base.Milvus != nil:
+		result.Milvus = base.Milvus.DeepCopy()
+	}
+	return result
 }
 
 func jobPhase(job *batchv1.Job) (dpv1alpha1.ResourcePhase, string, *metav1.Time) {

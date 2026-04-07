@@ -114,7 +114,16 @@ func (r *BackupRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	for i := range resolved.Repositories {
 		repository := &resolved.Repositories[i]
-		desired := buildBackupRunJob(&run, resolved.Policy, resolved.Source, repository, snapshot)
+		desired, err := buildBackupRunJob(&run, resolved.Policy, resolved.Source, repository, snapshot)
+		if err != nil {
+			run.Status.Phase = dpv1alpha1.ResourcePhaseFailed
+			run.Status.CompletedAt = nowTime()
+			run.Status.JobNames = uniqueStrings(jobNames)
+			run.Status.Repositories = repositoryStatuses
+			markCondition(&run.Status.Conditions, "Accepted", metav1.ConditionFalse, "RenderFailed", err.Error(), run.Generation)
+			markCondition(&run.Status.Conditions, "Completed", metav1.ConditionFalse, "RenderFailed", err.Error(), run.Generation)
+			return patchStatus(ctrl.Result{}, nil)
+		}
 		jobNames = append(jobNames, desired.Name)
 
 		current := &batchv1.Job{}

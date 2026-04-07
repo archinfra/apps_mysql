@@ -18,4 +18,5 @@ spec:
     enabled: true
     mode: Metadata
   execution:
-    runnerImage: sealos.hub:5000/kube4/backup-runner:dev
+    runnerImage: sealos.hub:5000/kube4/mysql:8.0.45
+    helperImage: sealos.hub:5000/kube4/minio-mc:latest

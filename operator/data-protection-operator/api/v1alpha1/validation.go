@@ -22,6 +22,9 @@ func (s *BackupSourceSpec) ValidateBasic() error {
 	if s.TargetRef == nil && strings.TrimSpace(s.Endpoint.Host) == "" && s.Endpoint.ServiceRef == nil {
 		return fmt.Errorf("spec.targetRef or spec.endpoint.host/serviceRef is required")
 	}
+	if err := validateMySQLDriverConfig(s.DriverConfig.MySQL); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -68,6 +71,9 @@ func (s *BackupPolicySpec) ValidateBasic() error {
 	if strings.TrimSpace(s.Schedule.Cron) == "" && !s.Suspend {
 		return fmt.Errorf("spec.schedule.cron is required unless the policy is suspended")
 	}
+	if err := validateMySQLDriverConfig(s.DriverConfig.MySQL); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -81,6 +87,9 @@ func (s *BackupRunSpec) ValidateBasic() error {
 	}
 	if hasDuplicateLocalObjectReferenceNames(s.RepositoryRefs) {
 		return fmt.Errorf("spec.repositoryRefs contains duplicate repository names")
+	}
+	if err := validateMySQLDriverConfig(s.DriverConfig.MySQL); err != nil {
+		return err
 	}
 	return nil
 }
@@ -101,6 +110,9 @@ func (s *RestoreRequestSpec) ValidateBasic() error {
 		default:
 			return fmt.Errorf("unsupported spec.target.mode %q", s.Target.Mode)
 		}
+	}
+	if err := validateMySQLDriverConfig(s.Target.DriverConfig.MySQL); err != nil {
+		return err
 	}
 	return nil
 }
@@ -138,4 +150,31 @@ func hasDuplicateLocalObjectReferenceNames(refs []corev1.LocalObjectReference) b
 		seen[name] = struct{}{}
 	}
 	return false
+}
+
+func validateMySQLDriverConfig(config *MySQLDriverConfig) error {
+	if config == nil {
+		return nil
+	}
+	if len(config.Databases) > 0 && len(config.Tables) > 0 {
+		return fmt.Errorf("mysql driver config cannot set both databases and tables")
+	}
+	for _, table := range config.Tables {
+		table = strings.TrimSpace(table)
+		if table == "" {
+			continue
+		}
+		parts := strings.Split(table, ".")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return fmt.Errorf("mysql driver config table selector must be database.table, got %q", table)
+		}
+	}
+	if restoreMode := strings.TrimSpace(config.RestoreMode); restoreMode != "" {
+		switch restoreMode {
+		case "merge", "wipe-all-user-databases":
+		default:
+			return fmt.Errorf("unsupported mysql restoreMode %q", config.RestoreMode)
+		}
+	}
+	return nil
 }

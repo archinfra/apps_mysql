@@ -1,18 +1,27 @@
 # Data Protection Operator 开发说明
 
-## 1. 当前目标
+## 1. 当前阶段
 
-当前阶段优先打稳控制面，而不是一次性做完所有数据面细节。
+当前阶段的目标不是一次性做完所有中间件的数据面，而是先把控制面和第一批真实 driver 打稳。
 
-本轮已经落地的最小闭环是：
+目前已经有两层能力：
 
-- `BackupSource` / `BackupRepository` 基础状态校验
+- 控制面：CRD、controller、状态流转、幂等 reconcile
+- 数据面：MySQL 内建 backup/restore runtime
+
+## 2. 当前闭环
+
+已经跑通的主链路：
+
+- `BackupSource` / `BackupRepository` 状态校验
 - `BackupPolicy -> CronJob`
 - `BackupRun -> Job`
 - `RestoreRequest -> Job`
-- 子资源状态回推到 CRD `status`
+- `Job -> CRD status`
+- MySQL + NFS
+- MySQL + S3/MinIO
 
-## 2. 当前目录
+## 3. 目录结构
 
 Operator 位于：
 
@@ -20,72 +29,82 @@ Operator 位于：
 
 关键目录：
 
-- `api/v1alpha1`: CRD 类型与校验
-- `controllers`: controller 与资源生成器
-- `config/crd/bases`: 生成后的 CRD 清单
-- `config/samples`: 样例资源
+- `api/v1alpha1`: CRD 类型、基础校验、命名规则
+- `controllers`: controller、资源编排、driver runtime
+- `config/crd/bases`: 生成后的 CRD
+- `config/samples`: 示例资源
 - `hack`: 开发辅助脚本
 
-## 3. 当前控制器职责
+## 4. Controller 职责
 
 ### `BackupSourceReconciler`
 
 - 校验 `spec`
 - 回填 `status.phase`
-- 标记 `Ready` 条件
+- 标记 `Ready`
 
 ### `BackupRepositoryReconciler`
 
 - 校验仓库配置
 - 回填 `status.phase`
-- 标记 `Ready` 条件
+- 标记 `Ready`
 
 ### `BackupPolicyReconciler`
 
-- 校验 `source/repository` 依赖
+- 校验 source / repository 依赖
 - 一个 repository 生成一个 `CronJob`
-- 重复 reconcile 不重复创建
-- 计划缩容时删除失效的旧 `CronJob`
-- `suspend` 时保留 `CronJob` 但置为暂停
+- 重复 reconcile 幂等
+- 计划收缩时自动删除失效 `CronJob`
 
 ### `BackupRunReconciler`
 
 - 解析 `policyRef` 或显式 `repositoryRefs`
 - 一个 repository 生成一个一次性 `Job`
-- 使用稳定命名避免重复创建
-- 根据 `Job` 状态聚合 `phase/repositories/completedAt`
+- 用稳定命名避免重复创建
+- 聚合子 `Job` 状态
 
 ### `RestoreRequestReconciler`
 
-- 支持显式 `repositoryRef`
-- 如果只给了 `backupRunRef`，且来源唯一，可自动推导仓库
+- 解析 restore 来源
 - 生成单个 restore `Job`
-- 根据 `Job` 状态聚合 `phase/completedAt`
+- 聚合子 `Job` 状态
 
-## 4. Placeholder Runner 约定
+## 5. MySQL 内建 Runtime
 
-当前默认 runner 只是为了先跑通控制面闭环：
+位置：
 
-- 默认镜像：`busybox:1.36`
-- 默认命令：`/bin/sh -c`
-- 默认行为：打印操作上下文并退出
+- `controllers/mysql_runtime.go`
 
-如果你已经有自己的 runner 镜像，可以在 `BackupPolicy.spec.execution` 里覆盖：
+设计原则：
 
-- `runnerImage`
-- `command`
-- `args`
-- `extraEnv`
+- 优先复用现有 shell 方案里已经验证过的 MySQL 逻辑
+- 控制面继续在 Go controller 里
+- 数据导出/导入在 Job 容器里执行
+- `nfs` 和 `s3/minio` 走不同 Pod 拓扑
 
-## 5. 推荐开发顺序
+当前行为：
 
-1. 改 API 或 controller
+- `nfs`: 单 MySQL 容器直接读写 NFS
+- `s3/minio` backup: `mc` initContainer 预拉取历史快照，MySQL 容器产出新快照，`mc` sidecar 回传
+- `s3/minio` restore: `mc` initContainer 先下载，再由 MySQL 容器恢复
+
+## 6. 配置约束
+
+MySQL driver 当前做了这些硬性校验：
+
+- 不能同时设置 `databases` 和 `tables`
+- `tables` 必须是 `database.table`
+- `restoreMode` 只允许 `merge` 或 `wipe-all-user-databases`
+
+## 7. 推荐开发顺序
+
+1. 修改 API 或 controller
 2. 运行 `make generate`
 3. 运行 `make manifests`
 4. 运行 `make test`
 5. 再同步到 Linux 开发机验证
 
-## 6. 本地常用命令
+## 8. 常用命令
 
 ```bash
 cd operator/data-protection-operator
@@ -96,15 +115,9 @@ make test
 make build
 ```
 
-`Makefile` 已做兼容处理：
+## 9. 工程约束
 
-- 优先使用 PATH 里的 `go/gofmt`
-- 找不到时回退到 `/usr/local/go/bin`
-- Windows 下自动使用 `controller-gen.exe`
-
-## 7. 代码约束
-
-- `BackupPolicy` 对子 `CronJob` 允许更新与清理
-- `BackupRun` / `RestoreRequest` 视为请求型资源，优先稳定命名和审计，不做激进删除重建
-- 依赖“暂时不存在”与“配置本身矛盾”要区分处理
-- 所有控制器都要优先保证重复 reconcile 幂等
+- `BackupPolicy` 允许更新和清理子 `CronJob`
+- `BackupRun` / `RestoreRequest` 视为请求型资源，优先稳定命名和审计
+- 区分“依赖暂时不存在”和“配置本身矛盾”
+- 所有 controller 都必须优先保证重复 reconcile 幂等

@@ -156,7 +156,15 @@ func (r *RestoreRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		execution = policy.Spec.Execution
 	}
 
-	desired := buildRestoreJob(&restore, backupRun, source, repository, execution, snapshot)
+	desired, err := buildRestoreJob(&restore, backupRun, source, repository, execution, snapshot)
+	if err != nil {
+		restore.Status.Phase = dpv1alpha1.ResourcePhaseFailed
+		restore.Status.CompletedAt = nowTime()
+		restore.Status.JobName = ""
+		markCondition(&restore.Status.Conditions, "Accepted", metav1.ConditionFalse, "RenderFailed", err.Error(), restore.Generation)
+		markCondition(&restore.Status.Conditions, "Completed", metav1.ConditionFalse, "RenderFailed", err.Error(), restore.Generation)
+		return patchStatus(ctrl.Result{}, nil)
+	}
 	restore.Status.JobName = desired.Name
 
 	current := &batchv1.Job{}

@@ -112,7 +112,14 @@ func (r *BackupPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	desiredCronJobNames := make(map[string]struct{}, len(repositories))
 	var latestLastScheduleTime *metav1.Time
 	for i := range repositories {
-		desired := buildBackupCronJob(&policy, source, &repositories[i])
+		desired, err := buildBackupCronJob(&policy, source, &repositories[i])
+		if err != nil {
+			policy.Status.Phase = dpv1alpha1.ResourcePhaseFailed
+			policy.Status.LastScheduleTime = nil
+			policy.Status.NextScheduleTime = nil
+			markCondition(&policy.Status.Conditions, "Ready", metav1.ConditionFalse, "RenderFailed", err.Error(), policy.Generation)
+			return patchStatus(ctrl.Result{}, nil)
+		}
 		desiredCronJobNames[desired.Name] = struct{}{}
 
 		current := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}

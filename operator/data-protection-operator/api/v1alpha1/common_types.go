@@ -96,6 +96,7 @@ type VerificationSpec struct {
 
 type ExecutionTemplateSpec struct {
 	RunnerImage             string                      `json:"runnerImage,omitempty"`
+	HelperImage             string                      `json:"helperImage,omitempty"`
 	ServiceAccountName      string                      `json:"serviceAccountName,omitempty"`
 	ImagePullPolicy         corev1.PullPolicy           `json:"imagePullPolicy,omitempty"`
 	Command                 []string                    `json:"command,omitempty"`

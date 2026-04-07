@@ -292,6 +292,58 @@ func TestRestoreRequestReconcileCreatesSingleJobFromBackupRun(t *testing.T) {
 	}
 }
 
+func TestBuildBuiltInMySQLBackupRunJobUsesRepositorySpecificRuntime(t *testing.T) {
+	source := &dpv1alpha1.BackupSource{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-prod", Namespace: "backup-system"},
+		Spec: dpv1alpha1.BackupSourceSpec{
+			Driver: dpv1alpha1.BackupDriverMySQL,
+			Endpoint: dpv1alpha1.EndpointSpec{
+				Host:     "mysql.default.svc",
+				Port:     3306,
+				Username: "root",
+			},
+		},
+	}
+	repository := &dpv1alpha1.BackupRepository{
+		ObjectMeta: metav1.ObjectMeta{Name: "minio-b", Namespace: "backup-system"},
+		Spec: dpv1alpha1.BackupRepositorySpec{
+			Type: dpv1alpha1.RepositoryTypeS3,
+			S3:   &dpv1alpha1.S3RepositorySpec{Endpoint: "https://minio.example.com", Bucket: "backup"},
+		},
+	}
+	run := &dpv1alpha1.BackupRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "manual-001", Namespace: "backup-system"},
+		Spec: dpv1alpha1.BackupRunSpec{
+			SourceRef:      corev1.LocalObjectReference{Name: source.Name},
+			RepositoryRefs: []corev1.LocalObjectReference{{Name: repository.Name}},
+			Snapshot:       "snapshot-001",
+		},
+	}
+
+	job, err := buildBackupRunJob(run, nil, source, repository, "snapshot-001")
+	if err != nil {
+		t.Fatalf("build backup run job: %v", err)
+	}
+	if len(job.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container for s3 prefetch, got %d", len(job.Spec.Template.Spec.InitContainers))
+	}
+	if len(job.Spec.Template.Spec.Containers) != 2 {
+		t.Fatalf("expected 2 containers for mysql+s3 upload, got %d", len(job.Spec.Template.Spec.Containers))
+	}
+	if job.Spec.Template.Spec.Containers[0].Name != "mysql-backup" {
+		t.Fatalf("expected first container to be mysql-backup, got %s", job.Spec.Template.Spec.Containers[0].Name)
+	}
+	if job.Spec.Template.Spec.Containers[1].Name != "s3-upload" {
+		t.Fatalf("expected second container to be s3-upload, got %s", job.Spec.Template.Spec.Containers[1].Name)
+	}
+	if len(job.Spec.Template.Spec.Volumes) != 2 {
+		t.Fatalf("expected 2 volumes for s3 staging/status, got %d", len(job.Spec.Template.Spec.Volumes))
+	}
+	if got := job.Annotations[snapshotAnnotation]; got != "snapshot-001.sql.gz" {
+		t.Fatalf("expected snapshot annotation snapshot-001.sql.gz, got %q", got)
+	}
+}
+
 func newTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
