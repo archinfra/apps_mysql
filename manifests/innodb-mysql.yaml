@@ -229,15 +229,9 @@ spec:
               echo "report_host=$(hostname)" >> /mnt/conf.d/server-id.cnf
               mkdir -p /mnt/mysql-log
               chmod 0777 /mnt/mysql-log
-              rm -f /mnt/mysql-log/error.log /mnt/mysql-log/slow.log
-              ln -sf /proc/1/fd/2 /mnt/mysql-log/error.log
-#__FEATURE_STDOUT_LOGGING_START__
-              ln -sf /proc/1/fd/1 /mnt/mysql-log/slow.log
-#__FEATURE_STDOUT_LOGGING_END__
-#__FEATURE_FLUENTBIT_START__
-              touch /mnt/mysql-log/slow.log
-              chmod 0666 /mnt/mysql-log/slow.log
-#__FEATURE_FLUENTBIT_END__
+              : > /mnt/mysql-log/error.log
+              : > /mnt/mysql-log/slow.log
+              chmod 0666 /mnt/mysql-log/error.log /mnt/mysql-log/slow.log
           volumeMounts:
             - name: conf-dynamic
               mountPath: /mnt/conf.d
@@ -246,6 +240,21 @@ spec:
       containers:
         - name: mysql
           image: __MYSQL_IMAGE__
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /var/log/mysql
+              touch /var/log/mysql/error.log /var/log/mysql/slow.log
+              chmod 0666 /var/log/mysql/error.log /var/log/mysql/slow.log
+              tail -n0 -F /var/log/mysql/error.log >&2 &
+#__FEATURE_STDOUT_LOGGING_START__
+              tail -n0 -F /var/log/mysql/slow.log >&1 &
+#__FEATURE_STDOUT_LOGGING_END__
+              if command -v docker-entrypoint.sh >/dev/null 2>&1; then
+                exec docker-entrypoint.sh mysqld
+              fi
+              exec /entrypoint.sh mysqld
           env:
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
