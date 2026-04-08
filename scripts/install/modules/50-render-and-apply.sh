@@ -185,11 +185,17 @@ render_optional_block() {
 render_feature_blocks() {
   local file_path="$1"
   local nodeport_enabled="${NODEPORT_ENABLED}"
+  local stdout_logging_enabled="false"
+
+  if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
+    stdout_logging_enabled="true"
+  fi
 
   cat "${file_path}" \
     | render_optional_block "FEATURE_MONITORING" "${MONITORING_ENABLED}" \
     | render_optional_block "FEATURE_SERVICE_MONITOR" "${SERVICE_MONITOR_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
+    | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
     | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
 }
 

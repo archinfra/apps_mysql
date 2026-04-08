@@ -86,17 +86,14 @@ data:
     plugin_load_add=auth_socket.so
     loose_auth_socket=FORCE_PLUS_PERMANENT
     log_error_verbosity=3
-    log_error=/proc/self/fd/2
+    log_error=/var/log/mysql/error.log
     slow_query_log=ON
-    slow_query_log_file=/proc/self/fd/1
+    slow_query_log_file=/var/log/mysql/slow.log
     long_query_time=__MYSQL_SLOW_QUERY_TIME__
     log_queries_not_using_indexes=ON
     local-infile=1
     socket=/var/run/mysqld/mysqld.sock
     mysqlx_socket=/var/run/mysqld/mysqlx.sock
-#__FEATURE_FLUENTBIT_START__
-    slow_query_log_file=/var/log/mysql/slow.log
-#__FEATURE_FLUENTBIT_END__
 
     log_bin=mycluster
     enforce_gtid_consistency=ON
@@ -229,17 +226,22 @@ spec:
               echo "[mysqld]" > /mnt/conf.d/server-id.cnf
               echo "server-id=$server_id" >> /mnt/conf.d/server-id.cnf
               echo "report_host=$(hostname)" >> /mnt/conf.d/server-id.cnf
-#__FEATURE_FLUENTBIT_START__
               mkdir -p /mnt/mysql-log
               chmod 0777 /mnt/mysql-log
+              rm -f /mnt/mysql-log/error.log /mnt/mysql-log/slow.log
+              ln -sf /proc/1/fd/2 /mnt/mysql-log/error.log
+#__FEATURE_STDOUT_LOGGING_START__
+              ln -sf /proc/1/fd/1 /mnt/mysql-log/slow.log
+#__FEATURE_STDOUT_LOGGING_END__
+#__FEATURE_FLUENTBIT_START__
+              touch /mnt/mysql-log/slow.log
+              chmod 0666 /mnt/mysql-log/slow.log
 #__FEATURE_FLUENTBIT_END__
           volumeMounts:
             - name: conf-dynamic
               mountPath: /mnt/conf.d
-#__FEATURE_FLUENTBIT_START__
             - name: mysql-log
               mountPath: /mnt/mysql-log
-#__FEATURE_FLUENTBIT_END__
       containers:
         - name: mysql
           image: __MYSQL_IMAGE__
@@ -266,10 +268,8 @@ spec:
               mountPath: /var/run/mysqld
             - name: probes
               mountPath: /usr/local/bin/probes
-#__FEATURE_FLUENTBIT_START__
             - name: mysql-log
               mountPath: /var/log/mysql
-#__FEATURE_FLUENTBIT_END__
           livenessProbe:
             exec:
               command:
@@ -363,12 +363,12 @@ spec:
           configMap:
             name: __PROBE_CONFIGMAP__
             defaultMode: 0755
+        - name: mysql-log
+          emptyDir: {}
 #__FEATURE_FLUENTBIT_START__
         - name: fluent-bit-config
           configMap:
             name: __FLUENTBIT_CONFIGMAP__
-        - name: mysql-log
-          emptyDir: {}
 #__FEATURE_FLUENTBIT_END__
         - name: conf-dynamic
           emptyDir: {}

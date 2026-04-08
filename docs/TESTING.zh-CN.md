@@ -9,7 +9,8 @@
 2. 三类产物的动作边界正确
 3. 默认日志能被 `kubectl logs` 直接查看
 4. 启用 `--enable-fluentbit` 后日志仍可排障
-5. 老版本遗留的 backup 资源能被清理
+5. 不再出现 `/proc/self/fd/*` 的启动期 `chown` 报错
+6. 老版本遗留的 backup 资源能被清理
 
 ## 2. 静态校验
 
@@ -56,6 +57,7 @@ bash install.sh help logging
 1. `kubectl get sts,svc,pvc,pod -n mysql-demo`
 2. `kubectl get cronjob -n mysql-demo` 不应看到由 `apps_mysql` 创建的 backup 计划
 3. `kubectl logs -n mysql-demo mysql-0 -c mysql --tail=200` 可直接输出日志
+4. 启动日志中不应再出现 `chown: cannot access '/proc/self/fd/'`
 
 ### 4.2 启用 Fluent Bit sidecar
 
@@ -71,6 +73,7 @@ bash install.sh help logging
 1. `kubectl get pod -n mysql-demo mysql-0 -o yaml | grep fluent-bit`
 2. `kubectl logs -n mysql-demo mysql-0 -c mysql --tail=200` 仍能看到错误/常规日志
 3. `kubectl logs -n mysql-demo mysql-0 -c fluent-bit --tail=200` 能看到 sidecar 输出
+4. `kubectl logs -n mysql-demo mysql-0 -c mysql --tail=200` 不应再出现 `/proc/self/fd/*` chown 报错
 
 ## 5. monitoring addon 验证
 

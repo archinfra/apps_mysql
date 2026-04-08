@@ -67,6 +67,7 @@ kubectl logs -n mysql-demo mysql-0 -c mysql --tail=200
 1. 快速看错误日志
 2. 直接看 slow log
 3. 不依赖外部日志平台也能排查
+4. 避免因 `/proc/self/fd/*` 日志路径触发 MySQL entrypoint 的目录修复报错
 
 ## 5. 必须采 Pod 内慢日志文件
 

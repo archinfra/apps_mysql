@@ -45,8 +45,8 @@ flowchart TD
 ### 4.1 默认链路
 
 默认情况下：
-1. 错误日志输出到 `stderr`
-2. slow log 输出到 `stdout`
+1. MySQL 配置只写安全文件路径 `/var/log/mysql/*.log`
+2. 默认通过软链接把 error.log / slow.log 映射到 `stderr` / `stdout`
 3. 因此 `kubectl logs -c mysql` 可直接查看
 4. 平台 DaemonSet 也可以直接采集
 
@@ -54,7 +54,7 @@ flowchart TD
 
 启用 `--enable-fluentbit` 时：
 1. 错误日志仍留在 `mysql` 容器 `stderr`
-2. slow log 写入文件
+2. slow log 写入真实文件
 3. `fluent-bit` sidecar 负责转发 slow log
 
 这样做的好处是：

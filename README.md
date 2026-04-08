@@ -86,13 +86,14 @@
 - 必要时仍能接 fluent-bit sidecar
 
 默认行为：
-- MySQL 错误日志写到容器 `stderr`
-- slow log 写到容器 `stdout`
+- MySQL 日志统一写到 `/var/log/mysql/error.log` 和 `/var/log/mysql/slow.log`
+- 默认通过软链接把错误日志送到容器 `stderr`
+- 默认通过软链接把 slow log 送到容器 `stdout`
 - 因此默认就能用 `kubectl logs -c mysql`
 
 启用 `--enable-fluentbit` 后：
 - MySQL 错误日志仍保留在 `mysql` 容器 `stderr`
-- slow log 改写到文件
+- slow log 改写到真实文件
 - `fluent-bit` sidecar 负责把 slow log 转发到自己的 `stdout`
 
 这意味着：

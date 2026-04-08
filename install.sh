@@ -413,13 +413,13 @@ show_help_logging() {
 日志能力现在分两层：
 
 默认行为:
-  1. MySQL 普通日志和错误日志直接写到容器 stderr
-  2. 未开启 sidecar 时，slow log 写到容器 stdout
+  1. MySQL 日志统一写到 /var/log/mysql 下的安全路径
+  2. 未开启 sidecar 时，error.log / slow.log 会被软链接到容器 stderr / stdout
   3. 因此默认就支持 kubectl logs 查看，也方便平台 DaemonSet 统一采集
 
 启用 --enable-fluentbit 后:
-  1. mysql 容器里的 stderr 日志仍然保留，kubectl logs -c mysql 仍然可看
-  2. slow log 改为写文件，由 fluent-bit sidecar 转发到它自己的 stdout
+  1. error.log 仍会进入 mysql 容器 stderr，kubectl logs -c mysql 仍然可看
+  2. slow log 改为写真实文件，由 fluent-bit sidecar 转发到它自己的 stdout
   3. 适合必须消费文件型慢日志的场景
 
 当前推荐:
@@ -1366,11 +1366,17 @@ render_optional_block() {
 render_feature_blocks() {
   local file_path="$1"
   local nodeport_enabled="${NODEPORT_ENABLED}"
+  local stdout_logging_enabled="false"
+
+  if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
+    stdout_logging_enabled="true"
+  fi
 
   cat "${file_path}" \
     | render_optional_block "FEATURE_MONITORING" "${MONITORING_ENABLED}" \
     | render_optional_block "FEATURE_SERVICE_MONITOR" "${SERVICE_MONITOR_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
+    | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
     | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
 }
 
