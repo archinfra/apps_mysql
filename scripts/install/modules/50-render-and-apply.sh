@@ -72,7 +72,7 @@ payload_cache_ready() {
 
   [[ -f "${signature_file}" ]] || return 1
   [[ "$(cat "${signature_file}")" == "${expected_signature}" ]] || return 1
-  [[ -f "${IMAGE_JSON}" ]] || return 1
+  [[ -f "${IMAGE_INDEX}" ]] || return 1
 }
 
 
@@ -117,12 +117,11 @@ prepare_images() {
   docker_login
 
   local count=0
-  while IFS= read -r item; do
-    [[ -n "${item}" ]] || continue
+  while IFS=$'\t' read -r tar_name image_tag; do
+    [[ -n "${tar_name}" ]] || continue
+    [[ -n "${image_tag}" ]] || continue
 
-    local tar_name image_tag target_tag tar_path
-    tar_name="$(jq -r '.tar' <<<"${item}")"
-    image_tag="$(jq -r '.tag // .pull' <<<"${item}")"
+    local target_tag tar_path
     target_tag="$(resolve_target_image_tag "${image_tag}")"
     tar_path="${IMAGE_DIR}/${tar_name}"
 
@@ -148,7 +147,7 @@ prepare_images() {
     log "推送镜像 ${target_tag}"
     docker push "${target_tag}" >/dev/null
     count=$((count + 1))
-  done < <(jq -c '.[]' "${IMAGE_JSON}")
+  done < "${IMAGE_INDEX}"
 
   (( count > 0 )) || die "载荷中未发现可导入的镜像归档"
   success "已准备 ${count} 个镜像归档"
@@ -245,9 +244,9 @@ extract_payload() {
   mkdir -p "${WORKDIR}" "${IMAGE_DIR}" "${MANIFEST_DIR}"
 
   log "正在解压元数据到 ${WORKDIR}"
-  payload_extract_entries "${WORKDIR}" "./manifests" "./images/image.json" || die "解压载荷元数据失败"
+  payload_extract_entries "${WORKDIR}" "./manifests" "./images/image.json" "./images/image-index.tsv" || die "解压载荷元数据失败"
 
-  [[ -f "${IMAGE_JSON}" ]] || die "缺少 image.json"
+  [[ -f "${IMAGE_INDEX}" ]] || die "缺少 image-index.tsv"
 
   printf '%s\n' "${expected_signature}" > "${signature_file}"
   success "载荷元数据解压完成"

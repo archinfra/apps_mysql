@@ -12,6 +12,7 @@ IMAGE_JSON="${IMAGES_DIR}/image.json"
 ASSEMBLER="${ROOT_DIR}/scripts/assemble-install.sh"
 INSTALL_MODULE_ROOT="${ROOT_DIR}/scripts/install/modules"
 SELECTED_IMAGE_ITEMS_FILE="${TEMP_DIR}/selected-images.jsonl"
+SELECTED_IMAGE_INDEX_FILE="${TEMP_DIR}/selected-images.tsv"
 
 ARCH="amd64"
 PLATFORM="linux/amd64"
@@ -156,6 +157,7 @@ prepare_directories() {
   rm -rf "${TEMP_DIR}" "${PAYLOAD_FILE}"
   mkdir -p "${TEMP_DIR}/images" "${TEMP_DIR}/manifests" "${DIST_DIR}"
   : > "${SELECTED_IMAGE_ITEMS_FILE}"
+  : > "${SELECTED_IMAGE_INDEX_FILE}"
 }
 
 profile_needs_image_tag() {
@@ -237,6 +239,7 @@ prepare_images() {
     log "Save ${tag} -> ${TEMP_DIR}/images/${tar_name}"
     docker save -o "${TEMP_DIR}/images/${tar_name}" "${tag}"
     printf '%s\n' "${item}" >> "${SELECTED_IMAGE_ITEMS_FILE}"
+    printf '%s\t%s\n' "${tar_name}" "${tag}" >> "${SELECTED_IMAGE_INDEX_FILE}"
     count=$((count + 1))
   done < <(jq -c --arg arch "${ARCH}" '.[] | select(.arch == $arch)' "${IMAGE_JSON}")
 
@@ -256,6 +259,7 @@ package_payload() {
   done
 
   jq -s '.' "${SELECTED_IMAGE_ITEMS_FILE}" > "${TEMP_DIR}/images/image.json"
+  cp "${SELECTED_IMAGE_INDEX_FILE}" "${TEMP_DIR}/images/image-index.tsv"
 
   (
     cd "${TEMP_DIR}"

@@ -1,7 +1,7 @@
 # apps_mysql
 
 面向 Kubernetes 的 MySQL 离线交付与运维工具包。
-当前版本：`v1.5.6`
+当前版本：`v1.5.7`
 
 从这一版开始，`apps_mysql` 明确只保留三类能力：
 - MySQL 安装与对齐
@@ -19,6 +19,11 @@
 - `mysql-monitoring-<arch>.run`
 
 它们共用同一套模块和 manifest，但会按职责裁剪镜像、动作和帮助信息。
+
+运行时依赖说明：
+- 目标安装机器需要 `kubectl`
+- 如需导入并推送离线镜像，还需要 `docker`
+- 最终 `.run` 安装包不再依赖 `jq`
 
 ## 2. 能力边界
 

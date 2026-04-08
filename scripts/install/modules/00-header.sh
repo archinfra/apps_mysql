@@ -7,13 +7,14 @@
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.5.6"
+APP_VERSION="1.5.7"
 PACKAGE_PROFILE="${PACKAGE_PROFILE:-integrated}"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
 MANIFEST_DIR="${WORKDIR}/manifests"
 
 IMAGE_JSON="${IMAGE_DIR}/image.json"
+IMAGE_INDEX="${IMAGE_DIR}/image-index.tsv"
 MYSQL_MANIFEST="${MANIFEST_DIR}/innodb-mysql.yaml"
 BENCHMARK_MANIFEST="${MANIFEST_DIR}/mysql-benchmark-job.yaml"
 MONITORING_ADDON_MANIFEST="${MANIFEST_DIR}/mysql-addon-monitoring.yaml"
