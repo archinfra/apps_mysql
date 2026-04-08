@@ -3,9 +3,6 @@ package_profile_label() {
     integrated)
       echo "integrated"
       ;;
-    backup-restore)
-      echo "backup-restore"
-      ;;
     benchmark)
       echo "benchmark"
       ;;
@@ -24,11 +21,8 @@ package_profile_supports_action() {
 
   case "${PACKAGE_PROFILE}" in
     integrated)
-      return 0
-      ;;
-    backup-restore)
       case "${action_name}" in
-        help|status|addon-install|addon-uninstall|addon-status|backup|restore|verify-backup-restore)
+        install|uninstall|status|addon-install|addon-uninstall|addon-status|benchmark|help)
           return 0
           ;;
       esac
@@ -60,18 +54,7 @@ package_profile_supports_addon() {
   local addon_name="$1"
 
   case "${PACKAGE_PROFILE}" in
-    integrated)
-      case "${addon_name}" in
-        monitoring|service-monitor|backup)
-          return 0
-          ;;
-      esac
-      ;;
-    backup-restore)
-      [[ "${addon_name}" == "backup" ]]
-      return
-      ;;
-    monitoring)
+    integrated|monitoring)
       case "${addon_name}" in
         monitoring|service-monitor)
           return 0
@@ -87,10 +70,7 @@ package_profile_supports_addon() {
 package_profile_supported_actions_text() {
   case "${PACKAGE_PROFILE}" in
     integrated)
-      echo "install uninstall status addon-install addon-uninstall addon-status backup restore verify-backup-restore benchmark help"
-      ;;
-    backup-restore)
-      echo "status addon-install addon-uninstall addon-status backup restore verify-backup-restore help"
+      echo "install uninstall status addon-install addon-uninstall addon-status benchmark help"
       ;;
     benchmark)
       echo "benchmark help"

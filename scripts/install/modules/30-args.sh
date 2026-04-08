@@ -27,7 +27,7 @@ parse_args() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      install|uninstall|status|addon-install|addon-uninstall|addon-status|backup|restore|verify-backup-restore|benchmark)
+      install|uninstall|status|addon-install|addon-uninstall|addon-status|benchmark)
         ACTION="$1"
         shift
         ;;
@@ -94,7 +94,6 @@ parse_args() {
         MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.0.45"
         MYSQL_EXPORTER_IMAGE="${REGISTRY_REPO}/mysqld-exporter:v0.15.1"
         FLUENTBIT_IMAGE="${REGISTRY_REPO}/fluent-bit:3.0.7"
-        S3_CLIENT_IMAGE="${REGISTRY_REPO}/minio-mc:latest"
         BUSYBOX_IMAGE="${REGISTRY_REPO}/busybox:v1"
         SYSBENCH_IMAGE="${REGISTRY_REPO}/sysbench:1.0.20-oe2403sp1"
         shift 2
@@ -127,11 +126,6 @@ parse_args() {
         MYSQL_PASSWORD_KEY_EXPLICIT="true"
         shift 2
         ;;
-      --mysql-target-name)
-        MYSQL_TARGET_NAME="$2"
-        MYSQL_TARGET_NAME_EXPLICIT="true"
-        shift 2
-        ;;
       --enable-monitoring)
         MONITORING_ENABLED="true"
         shift
@@ -156,103 +150,9 @@ parse_args() {
         FLUENTBIT_ENABLED="false"
         shift
         ;;
-      --enable-backup)
-        BACKUP_ENABLED="true"
-        shift
-        ;;
-      --disable-backup)
-        BACKUP_ENABLED="false"
-        shift
-        ;;
-      --enable-benchmark)
-        BENCHMARK_ENABLED="true"
-        shift
-        ;;
-      --disable-benchmark)
-        BENCHMARK_ENABLED="false"
-        shift
-        ;;
       --mysql-slow-query-time)
         MYSQL_SLOW_QUERY_TIME="$2"
         shift 2
-        ;;
-      --backup-backend)
-        BACKUP_BACKEND="$2"
-        shift 2
-        ;;
-      --backup-store-name)
-        BACKUP_STORE_NAME="$2"
-        shift 2
-        ;;
-      --backup-nfs-server)
-        BACKUP_NFS_SERVER="$2"
-        shift 2
-        ;;
-      --backup-nfs-path)
-        BACKUP_NFS_PATH="$2"
-        shift 2
-        ;;
-      --backup-root-dir)
-        BACKUP_ROOT_DIR="$2"
-        shift 2
-        ;;
-      --backup-schedule)
-        BACKUP_SCHEDULE="$2"
-        shift 2
-        ;;
-      --backup-retention)
-        BACKUP_RETENTION="$2"
-        shift 2
-        ;;
-      --backup-databases)
-        BACKUP_DATABASES="$2"
-        shift 2
-        ;;
-      --backup-tables)
-        BACKUP_TABLES="$2"
-        shift 2
-        ;;
-      --backup-plan)
-        BACKUP_PLAN_EXTRA_SPECS+=("$2")
-        shift 2
-        ;;
-      --backup-plan-file)
-        BACKUP_PLAN_FILE="$2"
-        shift 2
-        ;;
-      --enable-default-backup-plan)
-        BACKUP_DEFAULT_PLAN_ENABLED="true"
-        BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="true"
-        shift
-        ;;
-      --disable-default-backup-plan)
-        BACKUP_DEFAULT_PLAN_ENABLED="false"
-        BACKUP_DEFAULT_PLAN_ENABLED_EXPLICIT="true"
-        shift
-        ;;
-      --s3-endpoint)
-        S3_ENDPOINT="$2"
-        shift 2
-        ;;
-      --s3-bucket)
-        S3_BUCKET="$2"
-        shift 2
-        ;;
-      --s3-prefix)
-        S3_PREFIX="$2"
-        shift 2
-        ;;
-      --s3-access-key)
-        S3_ACCESS_KEY="$2"
-        shift 2
-        ;;
-      --s3-secret-key)
-        S3_SECRET_KEY="$2"
-        shift 2
-        ;;
-      --s3-insecure)
-        S3_INSECURE="true"
-        shift
         ;;
       --exporter-user)
         ADDON_EXPORTER_USERNAME="$2"
@@ -265,19 +165,6 @@ parse_args() {
       --monitoring-target)
         ADDON_MONITORING_TARGET="$2"
         ADDON_MONITORING_TARGET_EXPLICIT="true"
-        shift 2
-        ;;
-      --restore-snapshot)
-        RESTORE_SNAPSHOT="$2"
-        shift 2
-        ;;
-      --restore-mode)
-        MYSQL_RESTORE_MODE="$2"
-        shift 2
-        ;;
-      --restore-source)
-        BACKUP_RESTORE_SOURCE="$2"
-        BACKUP_RESTORE_SOURCE_EXPLICIT="true"
         shift 2
         ;;
       --wait-timeout)
@@ -347,18 +234,15 @@ parse_args() {
         shift 2
         ;;
       --benchmark-host)
-        BENCHMARK_HOST="$2"
         MYSQL_HOST="$2"
         MYSQL_HOST_EXPLICIT="true"
         shift 2
         ;;
       --benchmark-port)
-        BENCHMARK_PORT="$2"
         MYSQL_PORT="$2"
         shift 2
         ;;
       --benchmark-user)
-        BENCHMARK_USER="$2"
         MYSQL_USER="$2"
         shift 2
         ;;
@@ -373,26 +257,26 @@ parse_args() {
   done
 }
 
+
 normalize_addons() {
   local raw="${ADDONS:-}"
   local normalized=()
-  local item trimmed
+  local item trimmed current exists
 
-  [[ -n "${raw}" ]] || die "动作 ${ACTION} 需要提供 --addons，示例: --addons monitoring,backup"
+  [[ -n "${raw}" ]] || die "动作 ${ACTION} 需要提供 --addons，例如 --addons monitoring,service-monitor"
 
   if [[ "${raw}" == "all" ]]; then
-    raw="monitoring,service-monitor,backup"
+    raw="monitoring,service-monitor"
   fi
 
   IFS=',' read -r -a items <<<"${raw}"
   for item in "${items[@]}"; do
-    trimmed="$(echo "${item}" | awk '{$1=$1; print}')"
+    trimmed="$(trim_string "${item}")"
     [[ -n "${trimmed}" ]] || continue
 
     case "${trimmed}" in
-      monitoring|service-monitor|backup)
-        local exists="false"
-        local current
+      monitoring|service-monitor)
+        exists="false"
         for current in "${normalized[@]}"; do
           if [[ "${current}" == "${trimmed}" ]]; then
             exists="true"
@@ -402,7 +286,7 @@ normalize_addons() {
         [[ "${exists}" == "true" ]] || normalized+=("${trimmed}")
         ;;
       *)
-        die "不支持的 addon: ${trimmed}，当前仅支持 monitoring, service-monitor, backup"
+        die "不支持的 addon: ${trimmed}，当前仅支持 monitoring, service-monitor"
         ;;
     esac
   done
@@ -418,36 +302,9 @@ addon_selected() {
 }
 
 
-needs_backup_storage() {
-  if [[ "${ACTION}" == "addon-install" ]]; then
-    addon_selected backup && return 0
-    return 1
-  fi
-
-  case "${ACTION}" in
-    install)
-      [[ "${BACKUP_ENABLED}" == "true" ]]
-      ;;
-    backup|restore|verify-backup-restore)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-
-backup_schedule_required() {
-  [[ "${ACTION}" == "install" && "${BACKUP_ENABLED}" == "true" ]] && return 0
-  [[ "${ACTION}" == "addon-install" ]] && addon_selected backup && return 0
-  return 1
-}
-
-
 action_needs_image_prepare() {
   case "${ACTION}" in
-    install|addon-install|backup|restore|verify-backup-restore|benchmark)
+    install|addon-install|benchmark)
       return 0
       ;;
     *)
@@ -458,27 +315,11 @@ action_needs_image_prepare() {
 
 
 action_needs_mysql_auth() {
-  case "${ACTION}" in
-    backup|restore|verify-backup-restore|benchmark)
-      return 0
-      ;;
-    addon-install)
-      addon_selected backup && return 0
-      return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  [[ "${ACTION}" == "benchmark" ]]
 }
 
 
-sanitize_target_name() {
-  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9.-]/-/g; s/\.\+/-/g; s/--\+/-/g; s/^-//; s/-$//'
-}
-
-
-resolve_mysql_target_defaults() {
+resolve_mysql_runtime_defaults() {
   local default_host="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local"
 
   if [[ -z "${MYSQL_HOST}" ]]; then
@@ -501,26 +342,8 @@ resolve_mysql_target_defaults() {
     fi
   fi
 
-  if [[ -z "${MYSQL_TARGET_NAME}" ]]; then
-    if [[ "${MYSQL_HOST_EXPLICIT}" == "true" ]]; then
-      MYSQL_TARGET_NAME="$(sanitize_target_name "${MYSQL_HOST}")"
-    else
-      MYSQL_TARGET_NAME="${STS_NAME}"
-    fi
-  fi
-
   if [[ -z "${ADDON_MONITORING_TARGET}" ]]; then
     ADDON_MONITORING_TARGET="${MYSQL_HOST}:${MYSQL_PORT}"
-  fi
-
-  if [[ -z "${BENCHMARK_HOST}" ]]; then
-    BENCHMARK_HOST="${MYSQL_HOST}"
-  fi
-  if [[ -z "${BENCHMARK_PORT}" ]]; then
-    BENCHMARK_PORT="${MYSQL_PORT}"
-  fi
-  if [[ -z "${BENCHMARK_USER}" ]]; then
-    BENCHMARK_USER="${MYSQL_USER}"
   fi
 
   if [[ "${BENCHMARK_TIME}" == "180" && "${BENCHMARK_ITERATIONS}" != "3" ]]; then
@@ -528,13 +351,14 @@ resolve_mysql_target_defaults() {
   fi
 }
 
+
 cluster_supports_service_monitor() {
   kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1
 }
 
 
 resolve_feature_dependencies() {
-  resolve_mysql_target_defaults
+  resolve_mysql_runtime_defaults
 
   if [[ "${MONITORING_ENABLED}" != "true" && "${SERVICE_MONITOR_ENABLED}" == "true" ]]; then
     warn "monitoring 已关闭，因此自动关闭 ServiceMonitor"

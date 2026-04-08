@@ -10,6 +10,7 @@ extract_benchmark_report_block() {
   '
 }
 
+
 run_benchmark() {
   extract_payload
   prepare_images
@@ -41,6 +42,7 @@ run_benchmark() {
   [[ -n "${json_path:-}" ]] && echo "JSON 报告: ${json_path}"
 }
 
+
 show_post_install_notes() {
   section "后续建议"
 
@@ -49,8 +51,9 @@ show_post_install_notes() {
 kubectl get pods -n ${NAMESPACE}
 kubectl get svc -n ${NAMESPACE}
 kubectl get pvc -n ${NAMESPACE}
-$( [[ "${BACKUP_ENABLED}" == "true" ]] && echo "kubectl get cronjob -n ${NAMESPACE}" )
 $( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c mysql --tail=200
+$( [[ "${FLUENTBIT_ENABLED}" == "true" ]] && echo "kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c fluent-bit --tail=200" )
 
 集群内访问地址:
 ${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:3306
@@ -62,6 +65,7 @@ NodePort 访问地址:
 1. uninstall 时不要加 --delete-pvc
 2. namespace 与 --sts-name 保持不变
 3. 再次执行 install 即可按当前开关重新对齐
+4. 备份恢复已迁移到独立数据保护系统，请勿再从 apps_mysql 安装器里寻找相关入口
 EOF
     return 0
   fi
@@ -70,8 +74,9 @@ EOF
 kubectl get pods -n ${NAMESPACE}
 kubectl get svc -n ${NAMESPACE}
 kubectl get pvc -n ${NAMESPACE}
-$( [[ "${BACKUP_ENABLED}" == "true" ]] && echo "kubectl get cronjob -n ${NAMESPACE}" )
 $( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c mysql --tail=200
+$( [[ "${FLUENTBIT_ENABLED}" == "true" ]] && echo "kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c fluent-bit --tail=200" )
 
 集群内访问地址:
 ${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:3306
@@ -83,28 +88,23 @@ NodePort 访问:
 1. uninstall 时不要加 --delete-pvc
 2. namespace 与 --sts-name 保持不变
 3. 再次执行 install 即可按当前开关重新对齐
+4. 备份恢复已迁移到独立数据保护系统，请勿再从 apps_mysql 安装器里寻找相关入口
 EOF
 }
 
-show_post_addon_notes() {
-  local backup_line="3. backup addon 会额外创建 CronJob"
-  if needs_backup_storage; then
-    backup_plan_build_catalog
-    backup_line="3. backup addon 会额外创建 ${#BACKUP_PLAN_CATALOG[@]} 个备份计划资源（CronJob/Secret）"
-  fi
 
+show_post_addon_notes() {
   section "Addon 后续建议"
   cat <<EOF
 kubectl get pods -n ${NAMESPACE}
 kubectl get deploy -n ${NAMESPACE}
-kubectl get cronjob -n ${NAMESPACE}
 $( cluster_supports_service_monitor && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
 
 业务影响说明:
 1. addon-install 默认不修改 MySQL StatefulSet
 2. monitoring addon 会额外创建 exporter Deployment
-${backup_line}
-4. 如需日志 sidecar，请改用 install，并提前评估滚动更新窗口
+3. 如需日志 sidecar，请改用 install，并提前评估滚动更新窗口
+4. 备份恢复能力已迁移到独立数据保护系统
 EOF
 }
 
@@ -126,7 +126,6 @@ main() {
   fi
 
   resolve_feature_dependencies
-  needs_backup_storage && load_backup_plan_file_if_requested
   prompt_missing_values
   validate_environment
   validate_inputs
@@ -156,15 +155,6 @@ main() {
       ;;
     status)
       show_status
-      ;;
-    backup)
-      run_backup
-      ;;
-    restore)
-      run_restore
-      ;;
-    verify-backup-restore)
-      verify_backup_restore
       ;;
     benchmark)
       run_benchmark

@@ -35,17 +35,12 @@ banner() {
 }
 
 
-backup_backend_is_nfs() {
-  [[ "${BACKUP_BACKEND}" == "nfs" ]]
-}
-
-
-backup_backend_is_s3() {
-  [[ "${BACKUP_BACKEND}" == "s3" ]]
+trim_string() {
+  local value="${1:-}"
+  echo "${value}" | awk '{$1=$1; print}'
 }
 
 
 program_name() {
   basename "$0"
 }
-

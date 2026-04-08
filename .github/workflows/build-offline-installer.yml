@@ -40,7 +40,6 @@ jobs:
           - arm64
         profile:
           - integrated
-          - backup-restore
           - benchmark
           - monitoring
 
@@ -64,9 +63,6 @@ jobs:
           case "${{ matrix.profile }}" in
             integrated)
               echo "basename=mysql-installer" >> "$GITHUB_OUTPUT"
-              ;;
-            backup-restore)
-              echo "basename=mysql-backup-restore" >> "$GITHUB_OUTPUT"
               ;;
             benchmark)
               echo "basename=mysql-benchmark" >> "$GITHUB_OUTPUT"

@@ -19,29 +19,19 @@ uninstall_addons() {
     delete_external_monitoring_resources
     success "monitoring addon 已移除"
   fi
-
-  if addon_selected backup; then
-    section "移除 backup addon"
-    delete_backup_resources
-    success "backup addon 已移除"
-  fi
 }
 
 
 show_addon_status() {
   local external_monitoring="未安装"
   local embedded_monitoring="未安装"
-  local backup_addon="未安装"
   local embedded_logging="未安装"
   local addon_service_monitor="未安装"
   local embedded_service_monitor="未安装"
-  local backup_selector
 
   require_namespace_exists
 
   resource_exists deployment "${ADDON_EXPORTER_DEPLOYMENT_NAME}" && external_monitoring="已安装"
-  backup_selector="$(backup_resource_selector)"
-  kubectl get cronjob -n "${NAMESPACE}" -l "${backup_selector}" -o name 2>/dev/null | grep -q . && backup_addon="已安装"
 
   if resource_exists statefulset "${STS_NAME}"; then
     statefulset_has_container "mysqld-exporter" && embedded_monitoring="已安装"
@@ -61,17 +51,18 @@ show_addon_status() {
   echo "内嵌 monitoring sidecar : ${embedded_monitoring}"
   echo "外置 ServiceMonitor     : ${addon_service_monitor}"
   echo "内嵌 ServiceMonitor     : ${embedded_service_monitor}"
-  echo "backup addon            : ${backup_addon}"
   echo "Fluent Bit sidecar      : ${embedded_logging}"
   echo
   echo "推荐结论:"
-  echo "1. 已有 MySQL 若补监控/备份，优先使用 addon-install，新资源以 Deployment/CronJob 形式补齐。"
-  echo "2. 日志推荐接入平台级 DaemonSet 日志体系，不建议默认叠加 sidecar。"
-  echo "3. 只有在必须采集容器内 slow log 文件时，才建议走 install --enable-fluentbit。"
+  echo "1. 已有 MySQL 若补监控，优先使用 addon-install，新资源以 Deployment 形式补齐。"
+  echo "2. 备份恢复已迁移到独立数据保护系统，不再通过 apps_mysql addon 管理。"
+  echo "3. 日志推荐接入平台级 DaemonSet 日志体系，只有在必须采集 Pod 内慢日志文件时才开启 sidecar。"
 }
 
 
 show_status() {
+  require_namespace_exists
+
   section "运行状态"
   kubectl get statefulset -n "${NAMESPACE}" || true
   echo
@@ -82,8 +73,6 @@ show_status() {
   kubectl get svc -n "${NAMESPACE}" || true
   echo
   kubectl get pvc -n "${NAMESPACE}" || true
-  echo
-  kubectl get cronjob -n "${NAMESPACE}" || true
   echo
   if cluster_supports_service_monitor; then
     kubectl get servicemonitor -n "${NAMESPACE}" || true
@@ -114,14 +103,14 @@ uninstall_app() {
   fi
 
   render_manifest "${MYSQL_MANIFEST}" | kubectl delete -n "${NAMESPACE}" --ignore-not-found -f - >/dev/null || true
-  delete_backup_resources
-  kubectl delete jobs -n "${NAMESPACE}" --ignore-not-found "mysql-restore" >/dev/null 2>&1 || true
+  delete_external_monitoring_resources
+  delete_legacy_backup_resources
   kubectl delete jobs -n "${NAMESPACE}" --ignore-not-found "mysql-benchmark" >/dev/null 2>&1 || true
-  kubectl delete jobs -n "${NAMESPACE}" --ignore-not-found -l job-name >/dev/null 2>&1 || true
   kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${METRICS_SERVICE_NAME}" >/dev/null 2>&1 || true
   kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${FLUENTBIT_CONFIGMAP}" >/dev/null 2>&1 || true
   if cluster_supports_service_monitor; then
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+    kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
   fi
   delete_pvcs_if_requested
 
@@ -141,12 +130,6 @@ install_app() {
 
   section "安装 / 对齐 MySQL"
   apply_mysql_manifests
-  if [[ "${BACKUP_ENABLED}" == "true" ]]; then
-    apply_backup_support_manifests_for_all_plans
-    apply_backup_schedule_manifests_for_all_plans
-  else
-    warn "当前关闭了备份组件，将清理 backup CronJob 及支持资源"
-  fi
   cleanup_disabled_optional_resources
   wait_for_statefulset_ready
   wait_for_mysql_ready
@@ -173,8 +156,8 @@ install_addons() {
       SERVICE_MONITOR_ENABLED="false"
     fi
 
-    if ! resource_exists statefulset "${STS_NAME}" && [[ "${ADDON_MONITORING_TARGET_EXPLICIT}" != "true" ]]; then
-      die "为已有外部 MySQL 安装 monitoring addon 时，请显式提供 --monitoring-target"
+    if ! resource_exists statefulset "${STS_NAME}" && [[ "${ADDON_MONITORING_TARGET_EXPLICIT}" != "true" && "${MYSQL_HOST_EXPLICIT}" != "true" ]]; then
+      die "为已有外部 MySQL 安装 monitoring addon 时，请显式提供 --monitoring-target，或至少提供 --mysql-host/--mysql-port"
     fi
 
     if monitoring_bootstrap_auth_available; then
@@ -187,18 +170,5 @@ install_addons() {
     apply_monitoring_addon_manifests
     kubectl rollout status "deployment/${ADDON_EXPORTER_DEPLOYMENT_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
     success "monitoring addon 安装完成"
-  fi
-
-  if addon_selected backup; then
-    if ! resource_exists statefulset "${STS_NAME}" && [[ "${MYSQL_HOST_EXPLICIT}" != "true" ]]; then
-      die "为已有外部 MySQL 安装 backup addon 时，请显式提供 --mysql-host"
-    fi
-
-    apply_backup_support_manifests_for_all_plans
-    preflight_mysql_connection "预检 backup addon 目标连接"
-
-    section "安装 backup addon"
-    apply_backup_schedule_manifests_for_all_plans
-    success "backup addon 安装完成"
   fi
 }

@@ -86,7 +86,7 @@ ensure_image_archive_available() {
 
   log "按需解压镜像归档 ${tar_name}"
   payload_extract_entries "${WORKDIR}" "./images/${tar_name}" || die "解压镜像归档失败: ${tar_name}"
-  [[ -f "${tar_path}" ]] || die "解压后仍未找到镜像归档: ${tar_name}"
+  [[ -f "${tar_path}" ]] || die "解压后仍未找到镜像归档 ${tar_name}"
 }
 
 
@@ -105,6 +105,7 @@ resolve_target_image_tag() {
 
   printf '%s/%s' "${REGISTRY_REPO}" "${suffix}"
 }
+
 
 prepare_images() {
   [[ "${SKIP_IMAGE_PREPARE}" == "true" ]] && {
@@ -153,6 +154,7 @@ prepare_images() {
   success "已准备 ${count} 个镜像归档"
 }
 
+
 ensure_namespace() {
   if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
     return 0
@@ -183,24 +185,15 @@ render_optional_block() {
 
 render_feature_blocks() {
   local file_path="$1"
-  local backup_nfs_enabled="false"
-  local backup_s3_enabled="false"
   local nodeport_enabled="${NODEPORT_ENABLED}"
-
-  if backup_backend_is_nfs; then
-    backup_nfs_enabled="true"
-  else
-    backup_s3_enabled="true"
-  fi
 
   cat "${file_path}" \
     | render_optional_block "FEATURE_MONITORING" "${MONITORING_ENABLED}" \
     | render_optional_block "FEATURE_SERVICE_MONITOR" "${SERVICE_MONITOR_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
-    | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}" \
-    | render_optional_block "BACKUP_NFS" "${backup_nfs_enabled}" \
-    | render_optional_block "BACKUP_S3" "${backup_s3_enabled}"
+    | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
 }
+
 
 render_manifest() {
   local file_path="$1"
@@ -214,11 +207,6 @@ apply_mysql_manifests() {
 }
 
 
-apply_backup_manifests() {
-  render_manifest "${BACKUP_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
-}
-
-
 apply_monitoring_addon_manifests() {
   require_manifest_file "${MONITORING_ADDON_MANIFEST}"
   render_manifest "${MONITORING_ADDON_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
@@ -226,14 +214,6 @@ apply_monitoring_addon_manifests() {
 
 
 cleanup_disabled_optional_resources() {
-  if [[ "${BACKUP_ENABLED}" != "true" ]]; then
-    delete_backup_resources
-  fi
-
-  if [[ "${BACKUP_ENABLED}" == "true" && ! backup_backend_is_s3 ]]; then
-    kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${BACKUP_STORAGE_SECRET}" >/dev/null 2>&1 || true
-  fi
-
   if [[ "${MONITORING_ENABLED}" != "true" ]]; then
     kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${METRICS_SERVICE_NAME}" >/dev/null 2>&1 || true
   fi
@@ -245,6 +225,8 @@ cleanup_disabled_optional_resources() {
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
     kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${FLUENTBIT_CONFIGMAP}" >/dev/null 2>&1 || true
   fi
+
+  delete_legacy_backup_resources
 }
 
 
@@ -277,28 +259,19 @@ image_needed_for_current_action() {
 
   case "${ACTION}" in
     install)
-      return 0
-      ;;
-    addon-install)
-      if addon_selected monitoring && [[ "${image_tag}" == */mysqld-exporter:* ]]; then
+      if [[ "${image_tag}" == */mysql:* || "${image_tag}" == */busybox:* ]]; then
         return 0
       fi
-      if addon_selected monitoring && [[ "${image_tag}" == */mysql:* ]]; then
+      if [[ "${MONITORING_ENABLED}" == "true" && "${image_tag}" == */mysqld-exporter:* ]]; then
         return 0
       fi
-      if addon_selected backup && [[ "${image_tag}" == */mysql:* ]]; then
-        return 0
-      fi
-      if addon_selected backup && backup_plan_any_uses_backend s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+      if [[ "${FLUENTBIT_ENABLED}" == "true" && "${image_tag}" == */fluent-bit:* ]]; then
         return 0
       fi
       return 1
       ;;
-    backup|restore|verify-backup-restore)
-      if [[ "${image_tag}" == */mysql:* ]]; then
-        return 0
-      fi
-      if backup_plan_any_uses_backend s3 && [[ "${image_tag}" == */minio-mc:* ]]; then
+    addon-install)
+      if addon_selected monitoring && [[ "${image_tag}" == */mysql:* || "${image_tag}" == */mysqld-exporter:* ]]; then
         return 0
       fi
       return 1
@@ -346,40 +319,16 @@ template_replace() {
     -e "s#__ADDON_SERVICE_MONITOR_NAME__#${ADDON_SERVICE_MONITOR_NAME}#g" \
     -e "s#__FLUENTBIT_CONFIGMAP__#${FLUENTBIT_CONFIGMAP}#g" \
     -e "s#__MYSQL_SLOW_QUERY_TIME__#${MYSQL_SLOW_QUERY_TIME}#g" \
-    -e "s#__BACKUP_SCRIPT_CONFIGMAP__#${BACKUP_SCRIPT_CONFIGMAP}#g" \
-    -e "s#__BACKUP_CRONJOB_NAME__#${BACKUP_CRONJOB_NAME}#g" \
-    -e "s#__BACKUP_JOB_NAME__#${BACKUP_JOB_NAME:-mysql-backup-manual}#g" \
-    -e "s#__BACKUP_STORAGE_SECRET__#${BACKUP_STORAGE_SECRET}#g" \
-    -e "s#__BACKUP_PLAN_NAME__#${BACKUP_PLAN_NAME}#g" \
-    -e "s#__BACKUP_STORE_NAME__#${BACKUP_STORE_NAME}#g" \
-    -e "s#__BACKUP_NFS_SERVER__#${BACKUP_NFS_SERVER}#g" \
-    -e "s#__BACKUP_NFS_PATH__#${BACKUP_NFS_PATH}#g" \
-    -e "s#__BACKUP_ROOT_DIR__#${BACKUP_ROOT_DIR}#g" \
-    -e "s#__BACKUP_SCHEDULE__#${BACKUP_SCHEDULE}#g" \
-    -e "s#__BACKUP_RETENTION__#${BACKUP_RETENTION}#g" \
-    -e "s#__BACKUP_DATABASES__#${BACKUP_DATABASES}#g" \
-    -e "s#__BACKUP_TABLES__#${BACKUP_TABLES}#g" \
-    -e "s#__RESTORE_SNAPSHOT__#${RESTORE_SNAPSHOT}#g" \
-    -e "s#__MYSQL_RESTORE_MODE__#${MYSQL_RESTORE_MODE}#g" \
-    -e "s#__S3_ENDPOINT__#${S3_ENDPOINT}#g" \
-    -e "s#__S3_BUCKET__#${S3_BUCKET}#g" \
-    -e "s#__S3_PREFIX__#${S3_PREFIX}#g" \
-    -e "s#__S3_ACCESS_KEY__#${S3_ACCESS_KEY}#g" \
-    -e "s#__S3_SECRET_KEY__#${S3_SECRET_KEY}#g" \
-    -e "s#__S3_INSECURE__#${S3_INSECURE}#g" \
     -e "s#__MYSQL_HOST__#${MYSQL_HOST}#g" \
     -e "s#__MYSQL_PORT__#${MYSQL_PORT}#g" \
     -e "s#__MYSQL_USER__#${MYSQL_USER}#g" \
     -e "s#__MYSQL_AUTH_SECRET__#${MYSQL_AUTH_SECRET}#g" \
     -e "s#__MYSQL_PASSWORD_KEY__#${MYSQL_PASSWORD_KEY}#g" \
-    -e "s#__MYSQL_TARGET_NAME__#${MYSQL_TARGET_NAME}#g" \
     -e "s#__MYSQL_IMAGE__#${MYSQL_IMAGE}#g" \
     -e "s#__MYSQL_EXPORTER_IMAGE__#${MYSQL_EXPORTER_IMAGE}#g" \
     -e "s#__FLUENTBIT_IMAGE__#${FLUENTBIT_IMAGE}#g" \
-    -e "s#__S3_CLIENT_IMAGE__#${S3_CLIENT_IMAGE}#g" \
     -e "s#__BUSYBOX_IMAGE__#${BUSYBOX_IMAGE}#g" \
     -e "s#__SYSBENCH_IMAGE__#${SYSBENCH_IMAGE}#g" \
-    -e "s#__RESTORE_JOB_NAME__#${RESTORE_JOB_NAME:-mysql-restore}#g" \
     -e "s#__BENCHMARK_JOB_NAME__#${BENCHMARK_JOB_NAME:-mysql-benchmark}#g" \
     -e "s#__BENCHMARK_CONCURRENCY__#${BENCHMARK_THREADS}#g" \
     -e "s#__BENCHMARK_THREADS__#${BENCHMARK_THREADS}#g" \
@@ -391,33 +340,13 @@ template_replace() {
     -e "s#__BENCHMARK_DB__#${BENCHMARK_DB}#g" \
     -e "s#__BENCHMARK_RAND_TYPE__#${BENCHMARK_RAND_TYPE}#g" \
     -e "s#__BENCHMARK_KEEP_DATA__#${BENCHMARK_KEEP_DATA}#g" \
-    -e "s#__BENCHMARK_PROFILE__#${BENCHMARK_PROFILE}#g" \
-    -e "s#__BENCHMARK_HOST__#${BENCHMARK_HOST}#g" \
-    -e "s#__BENCHMARK_PORT__#${BENCHMARK_PORT}#g" \
-    -e "s#__BENCHMARK_USER__#${BENCHMARK_USER}#g"
+    -e "s#__BENCHMARK_PROFILE__#${BENCHMARK_PROFILE}#g"
 }
+
 
 require_manifest_file() {
   local file_path="$1"
   [[ -f "${file_path}" ]] || die "当前产物包缺少必需 manifest: ${file_path}"
-}
-
-
-apply_backup_support_manifests() {
-  require_manifest_file "${BACKUP_SUPPORT_MANIFEST}"
-  render_manifest "${BACKUP_SUPPORT_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
-}
-
-
-apply_backup_schedule_manifests() {
-  require_manifest_file "${BACKUP_MANIFEST}"
-  render_manifest "${BACKUP_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
-}
-
-
-apply_restore_job() {
-  require_manifest_file "${RESTORE_MANIFEST}"
-  render_manifest "${RESTORE_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 

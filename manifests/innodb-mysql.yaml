@@ -86,15 +86,16 @@ data:
     plugin_load_add=auth_socket.so
     loose_auth_socket=FORCE_PLUS_PERMANENT
     log_error_verbosity=3
+    log_error=/proc/self/fd/2
+    slow_query_log=ON
+    slow_query_log_file=/proc/self/fd/1
+    long_query_time=__MYSQL_SLOW_QUERY_TIME__
+    log_queries_not_using_indexes=ON
     local-infile=1
     socket=/var/run/mysqld/mysqld.sock
     mysqlx_socket=/var/run/mysqld/mysqlx.sock
 #__FEATURE_FLUENTBIT_START__
-    log_error=/var/log/mysql/error.log
-    slow_query_log=ON
     slow_query_log_file=/var/log/mysql/slow.log
-    long_query_time=__MYSQL_SLOW_QUERY_TIME__
-    log_queries_not_using_indexes=ON
 #__FEATURE_FLUENTBIT_END__
 
     log_bin=mycluster
@@ -124,15 +125,6 @@ data:
         Flush 1
         Daemon Off
         Log_Level info
-
-    [INPUT]
-        Name tail
-        Tag mysql.error
-        Path /var/log/mysql/error.log
-        DB /tmp/mysql-error.db
-        Read_from_Head true
-        Refresh_Interval 5
-        Skip_Long_Lines On
 
     [INPUT]
         Name tail

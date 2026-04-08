@@ -47,7 +47,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  ./build.sh [--arch amd64|arm64|all] [--profile integrated|backup-restore|benchmark|monitoring|all]
+  ./build.sh [--arch amd64|arm64|all] [--profile integrated|benchmark|monitoring|all]
 
 Examples:
   ./build.sh --arch amd64 --profile integrated
@@ -79,7 +79,7 @@ normalize_arch() {
 
 normalize_profile() {
   case "$1" in
-    integrated|backup-restore|benchmark|monitoring)
+    integrated|benchmark|monitoring)
       PROFILE="$1"
       BUILD_ALL_PROFILES="false"
       ;;
@@ -96,9 +96,6 @@ profile_installer_basename() {
   case "${PROFILE}" in
     integrated)
       echo "mysql-installer"
-      ;;
-    backup-restore)
-      echo "mysql-backup-restore"
       ;;
     benchmark)
       echo "mysql-benchmark"
@@ -168,10 +165,6 @@ profile_needs_image_tag() {
     integrated)
       return 0
       ;;
-    backup-restore)
-      [[ "${image_tag}" == */mysql:* || "${image_tag}" == */minio-mc:* ]]
-      return
-      ;;
     benchmark)
       [[ "${image_tag}" == */mysql:* || "${image_tag}" == */sysbench:* ]]
       return
@@ -191,13 +184,6 @@ profile_needs_manifest() {
   case "${PROFILE}" in
     integrated)
       return 0
-      ;;
-    backup-restore)
-      case "${manifest_name}" in
-        mysql-backup-support.yaml|mysql-backup.yaml|mysql-backup-job.yaml|mysql-restore-job.yaml)
-          return 0
-          ;;
-      esac
       ;;
     benchmark)
       [[ "${manifest_name}" == "mysql-benchmark-job.yaml" ]]
@@ -326,7 +312,7 @@ build_matrix() {
   fi
 
   if [[ "${BUILD_ALL_PROFILES}" == "true" ]]; then
-    profiles=(integrated backup-restore benchmark monitoring)
+    profiles=(integrated benchmark monitoring)
   fi
 
   for arch in "${arches[@]}"; do

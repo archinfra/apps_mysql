@@ -1,107 +1,139 @@
-# MySQL 工具包测试说明
+# MySQL 工具包测试方案
 
-## 1. 本轮变更重点
+## 1. 本轮测试目标
 
-这轮重点不是单点修 bug，而是能力抽象升级：
+这一轮重点不是功能新增，而是能力边界收敛和日志体验修正。
 
-1. backup 升级为多 `backup plan`
-2. 支持多个 NFS、多个 MinIO/S3，以及混合多中心备份
-3. 支持按库、按表导出
-4. 支持 `--restore-source` 指定恢复来源
-5. build / GitHub Actions 改为构建多个产物包
+需要验证：
+1. 备份恢复入口已经从 `apps_mysql` 中彻底移除
+2. 三类产物的动作边界正确
+3. 默认日志能被 `kubectl logs` 直接查看
+4. 启用 `--enable-fluentbit` 后日志仍可排障
+5. 老版本遗留的 backup 资源能被清理
 
----
+## 2. 静态校验
 
-## 2. 已完成的静态校验
-
-本地已完成：
-
-1. `bash -n build.sh`
-2. `bash -n install.sh`
-3. `bash -n scripts/install/modules/*.sh`
-4. 重新组装 `install.sh`
-
-说明：
-
-1. 组装链路是通的
-2. 最终脚本语法无错误
-3. 多包构建逻辑在脚本层面已接通
-
----
-
-## 3. 本轮建议重点实测
-
-### 3.1 多计划备份
-
-建议验证：
-
-1. 默认主计划 + 额外 `--backup-plan`
-2. `--disable-default-backup-plan` 后仅保留显式计划
-3. 多个 NFS 同时落地
-4. NFS + MinIO 混合落地
-
-检查：
+本地至少执行：
 
 ```bash
-kubectl get cronjob -n <ns>
-kubectl get secret -n <ns>
-kubectl logs -n <ns> job/<manual-backup-job>
+bash -n build.sh
+bash -n install.sh
+bash -n scripts/install/modules/*.sh
+bash install.sh help overview
+bash install.sh help logging
 ```
 
-### 3.2 范围导出
+检查点：
+1. `help` 中不再出现 `backup` / `restore` / `verify-backup-restore`
+2. `packages` 中只剩三类 `.run` 包
+3. `addon` 中只剩 `monitoring` / `service-monitor`
 
-建议验证：
+## 3. 构建验证
 
-1. `--backup-databases`
-2. `--backup-tables`
-3. meta 文件中是否能看到 scope / databases / tables
+执行：
 
-### 3.3 restore-source
+```bash
+./build.sh --arch amd64 --profile all
+```
 
-建议验证：
+检查点：
+1. 只产出 `mysql-installer`、`mysql-benchmark`、`mysql-monitoring`
+2. 不再产出 `mysql-backup-restore`
+3. 每个产物都带 `.sha256`
 
-1. `--restore-source <plan-name>`
-2. `--restore-source auto`
-3. 指定 plan 不存在时的失败提示
+## 4. 集成安装验证
 
-### 3.4 危险模式边界
+### 4.1 默认安装
 
-建议验证：
+```bash
+./dist/mysql-installer-amd64.run install \
+  --namespace mysql-demo \
+  --root-password 'StrongPassw0rd' \
+  -y
+```
 
-1. 部分库/表备份 + `--restore-mode merge`
-2. 部分库/表备份 + `--restore-mode wipe-all-user-databases` 是否被阻断
-3. `verify-backup-restore` 是否只挑覆盖校验表的 plan 作为恢复来源
+检查：
+1. `kubectl get sts,svc,pvc,pod -n mysql-demo`
+2. `kubectl get cronjob -n mysql-demo` 不应看到由 `apps_mysql` 创建的 backup 计划
+3. `kubectl logs -n mysql-demo mysql-0 -c mysql --tail=200` 可直接输出日志
 
-### 3.5 多产物构建
+### 4.2 启用 Fluent Bit sidecar
 
-建议检查 Actions 或本地构建结果：
+```bash
+./dist/mysql-installer-amd64.run install \
+  --namespace mysql-demo \
+  --enable-fluentbit \
+  --mysql-slow-query-time 1 \
+  -y
+```
 
-1. `mysql-installer-<arch>.run`
-2. `mysql-backup-restore-<arch>.run`
-3. `mysql-benchmark-<arch>.run`
-4. `mysql-monitoring-<arch>.run`
+检查：
+1. `kubectl get pod -n mysql-demo mysql-0 -o yaml | grep fluent-bit`
+2. `kubectl logs -n mysql-demo mysql-0 -c mysql --tail=200` 仍能看到错误/常规日志
+3. `kubectl logs -n mysql-demo mysql-0 -c fluent-bit --tail=200` 能看到 sidecar 输出
 
-每个产物都应带对应 `.sha256`。
+## 5. monitoring addon 验证
 
----
+### 5.1 安装
 
-## 4. 推荐验证顺序
+```bash
+./dist/mysql-monitoring-amd64.run addon-install \
+  --namespace mysql-demo \
+  --addons monitoring,service-monitor \
+  --monitoring-target 10.0.0.20:3306 \
+  -y
+```
 
-1. 先验证 `build.sh --arch amd64 --profile all`
-2. 再验证 `mysql-backup-restore-*.run` 的多中心 backup addon
-3. 再验证手工 `backup`
-4. 再验证 `restore --restore-source`
-5. 最后验证 `mysql-benchmark-*.run` 和 `mysql-monitoring-*.run`
+检查：
+1. `kubectl get deploy,svc,secret -n mysql-demo | grep mysql-exporter`
+2. 集群若已安装 `ServiceMonitor` CRD，则应看到对应资源
+3. MySQL StatefulSet 不应因为 addon 安装而滚动
 
----
+### 5.2 卸载
 
-## 5. 远端实测建议
+```bash
+./dist/mysql-monitoring-amd64.run addon-uninstall \
+  --namespace mysql-demo \
+  --addons monitoring,service-monitor \
+  -y
+```
 
-如果使用你的测试机：
+检查：
+1. exporter Deployment/Service/Secret 被移除
+2. StatefulSet 仍保持原样
 
-1. 先做一个单库或单表的小范围 plan 冒烟
-2. 再上多中心计划
-3. 再做 restore-source 指定恢复
-4. 最后再做完整闭环校验
+## 6. benchmark 验证
 
-这样更容易在早期发现路径、凭据、对象存储目录或 NFS 挂载问题。
+```bash
+./dist/mysql-benchmark-amd64.run benchmark \
+  --namespace mysql-demo \
+  --mysql-host 10.0.0.20 \
+  --mysql-user root \
+  --mysql-password '<MYSQL_PASSWORD>' \
+  --benchmark-profile oltp-read-write \
+  --report-dir ./reports \
+  -y
+```
+
+检查：
+1. Job 能完成
+2. `reports/` 下有 `.log`、`.txt`、`.json`
+3. 不支持 `--warmup-time` 的 sysbench 版本也能正常跑完
+
+## 7. 老资源清理验证
+
+如果测试环境曾用旧版 `apps_mysql` 安装过 backup 资源，再执行一次新的 `install` 或 `uninstall`：
+
+检查：
+1. 旧 `CronJob/mysql-backup*` 被清理
+2. 旧 `ConfigMap/mysql-backup-scripts` 被清理
+3. 旧 `Secret/mysql-backup-storage` 被清理
+
+## 8. 结果判定
+
+通过标准：
+1. 用户入口里不再出现备份恢复能力
+2. 安装、监控、压测三条链路都可独立运行
+3. 默认日志可直接 `kubectl logs`
+4. sidecar 开启后，日志边界仍然清晰
+5. 老 backup 资源不会继续残留
