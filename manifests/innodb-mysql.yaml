@@ -179,6 +179,7 @@ metadata:
   name: __SERVICE_MONITOR_NAME__
   labels:
     app: __APP_NAME__
+    monitoring.archinfra.io/stack: default
 spec:
   namespaceSelector:
     matchNames:

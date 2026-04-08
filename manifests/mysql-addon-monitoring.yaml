@@ -82,6 +82,7 @@ metadata:
   labels:
     app: __APP_NAME__
     addon.mysql.io/type: monitoring
+    monitoring.archinfra.io/stack: default
 spec:
   namespaceSelector:
     matchNames:
