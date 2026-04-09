@@ -98,9 +98,7 @@ data:
     log_bin=mycluster
     enforce_gtid_consistency=ON
     gtid_mode=ON
-    relay_log_info_repository=TABLE
-    skip_slave_start=1
-    loose_group_replication_recovery_use_ssl=1
+    skip_replica_start=1
 
     datadir=/var/lib/mysql
     !includedir /etc/mysql/conf.d
