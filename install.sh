@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.5.12"
+APP_VERSION="1.5.13"
 PACKAGE_PROFILE="${PACKAGE_PROFILE:-integrated}"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
@@ -61,10 +61,13 @@ NODE_PORT="30306"
 NODEPORT_ENABLED="true"
 MONITORING_ENABLED="true"
 SERVICE_MONITOR_ENABLED="true"
+PROMETHEUS_RULE_ENABLED="true"
 FLUENTBIT_ENABLED="false"
 METRICS_SERVICE_NAME="mysql-metrics"
 METRICS_PORT="9104"
 SERVICE_MONITOR_NAME="mysql-monitor"
+PROMETHEUS_RULE_NAME="mysql-alerts"
+GRAFANA_DASHBOARD_NAME="mysql-dashboard"
 SERVICE_MONITOR_INTERVAL="30s"
 SERVICE_MONITOR_SCRAPE_TIMEOUT="10s"
 ADDON_EXPORTER_DEPLOYMENT_NAME="mysql-exporter"
@@ -75,6 +78,8 @@ ADDON_EXPORTER_PASSWORD="exporter@passw0rd"
 ADDON_MONITORING_TARGET=""
 ADDON_MONITORING_TARGET_EXPLICIT="false"
 ADDON_SERVICE_MONITOR_NAME="mysql-exporter-monitor"
+ADDON_PROMETHEUS_RULE_NAME="mysql-exporter-alerts"
+ADDON_GRAFANA_DASHBOARD_NAME="mysql-exporter-dashboard"
 FLUENTBIT_CONFIGMAP="mysql-fluent-bit"
 MYSQL_SLOW_QUERY_TIME="2"
 WAIT_TIMEOUT="10m"
@@ -1001,6 +1006,11 @@ cluster_supports_service_monitor() {
 }
 
 
+cluster_supports_prometheus_rule() {
+  kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1
+}
+
+
 resolve_feature_dependencies() {
   resolve_mysql_runtime_defaults
 
@@ -1009,9 +1019,14 @@ resolve_feature_dependencies() {
     SERVICE_MONITOR_ENABLED="false"
   fi
 
+  if [[ "${MONITORING_ENABLED}" != "true" && "${PROMETHEUS_RULE_ENABLED}" == "true" ]]; then
+    PROMETHEUS_RULE_ENABLED="false"
+  fi
+
   if [[ "${ACTION}" == "addon-install" || "${ACTION}" == "addon-uninstall" ]]; then
     normalize_addons
     SERVICE_MONITOR_ENABLED="false"
+    PROMETHEUS_RULE_ENABLED="false"
 
     if addon_selected service-monitor && ! addon_selected monitoring && [[ "${ACTION}" == "addon-install" ]]; then
       warn "service-monitor 依赖 monitoring，已自动补齐 monitoring"
@@ -1026,6 +1041,10 @@ resolve_feature_dependencies() {
 
     if addon_selected service-monitor; then
       SERVICE_MONITOR_ENABLED="true"
+    fi
+
+    if addon_selected monitoring; then
+      PROMETHEUS_RULE_ENABLED="true"
     fi
   fi
 }
@@ -1471,6 +1490,7 @@ render_feature_blocks() {
   cat "${file_path}" \
     | render_optional_block "FEATURE_MONITORING" "${MONITORING_ENABLED}" \
     | render_optional_block "FEATURE_SERVICE_MONITOR" "${SERVICE_MONITOR_ENABLED}" \
+    | render_optional_block "FEATURE_PROMETHEUS_RULE" "${PROMETHEUS_RULE_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
     | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
     | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
@@ -1502,6 +1522,11 @@ cleanup_disabled_optional_resources() {
 
   if [[ "${SERVICE_MONITOR_ENABLED}" != "true" ]] && cluster_supports_service_monitor; then
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${PROMETHEUS_RULE_ENABLED}" != "true" ]] && cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
   fi
 
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
@@ -1590,6 +1615,8 @@ template_replace() {
     -e "s#__METRICS_SERVICE_NAME__#${METRICS_SERVICE_NAME}#g" \
     -e "s#__METRICS_PORT__#${METRICS_PORT}#g" \
     -e "s#__SERVICE_MONITOR_NAME__#${SERVICE_MONITOR_NAME}#g" \
+    -e "s#__PROMETHEUS_RULE_NAME__#${PROMETHEUS_RULE_NAME}#g" \
+    -e "s#__GRAFANA_DASHBOARD_NAME__#${GRAFANA_DASHBOARD_NAME}#g" \
     -e "s#__SERVICE_MONITOR_INTERVAL__#${SERVICE_MONITOR_INTERVAL}#g" \
     -e "s#__SERVICE_MONITOR_SCRAPE_TIMEOUT__#${SERVICE_MONITOR_SCRAPE_TIMEOUT}#g" \
     -e "s#__ADDON_EXPORTER_DEPLOYMENT_NAME__#${ADDON_EXPORTER_DEPLOYMENT_NAME}#g" \
@@ -1599,6 +1626,8 @@ template_replace() {
     -e "s#__ADDON_EXPORTER_PASSWORD__#${ADDON_EXPORTER_PASSWORD}#g" \
     -e "s#__ADDON_MONITORING_TARGET__#${ADDON_MONITORING_TARGET}#g" \
     -e "s#__ADDON_SERVICE_MONITOR_NAME__#${ADDON_SERVICE_MONITOR_NAME}#g" \
+    -e "s#__ADDON_PROMETHEUS_RULE_NAME__#${ADDON_PROMETHEUS_RULE_NAME}#g" \
+    -e "s#__ADDON_GRAFANA_DASHBOARD_NAME__#${ADDON_GRAFANA_DASHBOARD_NAME}#g" \
     -e "s#__FLUENTBIT_CONFIGMAP__#${FLUENTBIT_CONFIGMAP}#g" \
     -e "s#__MYSQL_SLOW_QUERY_TIME__#${MYSQL_SLOW_QUERY_TIME}#g" \
     -e "s#__MYSQL_HOST__#${MYSQL_HOST}#g" \
@@ -1987,6 +2016,10 @@ uninstall_addons() {
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
   fi
 
+  if addon_selected monitoring && cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+  fi
+
   if addon_selected monitoring; then
     section "移除 monitoring addon"
     delete_external_monitoring_resources
@@ -2001,6 +2034,8 @@ show_addon_status() {
   local embedded_logging="未安装"
   local addon_service_monitor="未安装"
   local embedded_service_monitor="未安装"
+  local addon_prometheus_rule="未安装"
+  local embedded_prometheus_rule="未安装"
 
   require_namespace_exists
 
@@ -2019,11 +2054,21 @@ show_addon_status() {
     embedded_service_monitor="集群未安装 CRD"
   fi
 
+  if cluster_supports_prometheus_rule; then
+    resource_exists prometheusrule "${ADDON_PROMETHEUS_RULE_NAME}" && addon_prometheus_rule="已安装"
+    resource_exists prometheusrule "${PROMETHEUS_RULE_NAME}" && embedded_prometheus_rule="已安装"
+  else
+    addon_prometheus_rule="集群未安装 CRD"
+    embedded_prometheus_rule="集群未安装 CRD"
+  fi
+
   section "Addon 状态"
   echo "外置 monitoring addon   : ${external_monitoring}"
   echo "内嵌 monitoring sidecar : ${embedded_monitoring}"
   echo "外置 ServiceMonitor     : ${addon_service_monitor}"
   echo "内嵌 ServiceMonitor     : ${embedded_service_monitor}"
+  echo "外置 PrometheusRule     : ${addon_prometheus_rule}"
+  echo "内嵌 PrometheusRule     : ${embedded_prometheus_rule}"
   echo "Fluent Bit sidecar      : ${embedded_logging}"
   echo
   echo "推荐结论:"
@@ -2051,6 +2096,10 @@ show_status() {
     kubectl get servicemonitor -n "${NAMESPACE}" || true
     echo
   fi
+  if cluster_supports_prometheus_rule; then
+    kubectl get prometheusrule -n "${NAMESPACE}" || true
+    echo
+  fi
   kubectl get jobs -n "${NAMESPACE}" || true
 }
 
@@ -2074,6 +2123,9 @@ uninstall_app() {
   if ! cluster_supports_service_monitor; then
     SERVICE_MONITOR_ENABLED="false"
   fi
+  if ! cluster_supports_prometheus_rule; then
+    PROMETHEUS_RULE_ENABLED="false"
+  fi
 
   render_manifest "${MYSQL_MANIFEST}" | kubectl delete -n "${NAMESPACE}" --ignore-not-found -f - >/dev/null || true
   delete_external_monitoring_resources
@@ -2084,6 +2136,10 @@ uninstall_app() {
   if cluster_supports_service_monitor; then
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+  if cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
   fi
   delete_pvcs_if_requested
 
@@ -2099,6 +2155,11 @@ install_app() {
   if [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && ! cluster_supports_service_monitor; then
     warn "集群中未安装 ServiceMonitor CRD，本次跳过 ServiceMonitor 资源"
     SERVICE_MONITOR_ENABLED="false"
+  fi
+
+  if [[ "${PROMETHEUS_RULE_ENABLED}" == "true" ]] && ! cluster_supports_prometheus_rule; then
+    warn "集群中未安装 PrometheusRule CRD，本次跳过 PrometheusRule 资源"
+    PROMETHEUS_RULE_ENABLED="false"
   fi
 
   section "安装 / 对齐 MySQL"
@@ -2127,6 +2188,11 @@ install_addons() {
       ADDONS="${ADDONS#,}"
       ADDONS="${ADDONS%,}"
       SERVICE_MONITOR_ENABLED="false"
+    fi
+
+    if ! cluster_supports_prometheus_rule; then
+      warn "集群中未安装 PrometheusRule CRD，本次 monitoring addon 跳过告警规则"
+      PROMETHEUS_RULE_ENABLED="false"
     fi
 
     if ! resource_exists statefulset "${STS_NAME}" && [[ "${ADDON_MONITORING_TARGET_EXPLICIT}" != "true" && "${MYSQL_HOST_EXPLICIT}" != "true" ]]; then

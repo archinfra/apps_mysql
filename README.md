@@ -485,3 +485,35 @@ GitHub Actions 负责：
 
 - `main/master` 多架构构建
 - `v*` tag 发布 release
+## Built-in Monitoring, Alerts, And Dashboards
+
+Default install now enables:
+
+- `monitoring=true`
+- embedded exporter
+- `ServiceMonitor`
+- `PrometheusRule`
+- Grafana dashboard `ConfigMap`
+
+Grafana auto-import contract:
+
+- dashboard label: `grafana_dashboard=1`
+- platform label: `monitoring.archinfra.io/stack=default`
+- folder annotation: `grafana_folder=Middleware/MySQL`
+
+Built-in alerts:
+
+- `MySQLDown`
+- `MySQLConnectionsHigh`
+- `MySQLSlowQueriesHigh`
+
+Built-in dashboard panels:
+
+- MySQL Up
+- Threads Connected
+- Threads Running
+- Slow Queries / 1h
+- Query Rate
+- Connections
+
+If the cluster does not provide the `PrometheusRule` CRD, the installer automatically disables rule creation and keeps the main MySQL deployment path available.

@@ -361,6 +361,11 @@ cluster_supports_service_monitor() {
 }
 
 
+cluster_supports_prometheus_rule() {
+  kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1
+}
+
+
 resolve_feature_dependencies() {
   resolve_mysql_runtime_defaults
 
@@ -369,9 +374,14 @@ resolve_feature_dependencies() {
     SERVICE_MONITOR_ENABLED="false"
   fi
 
+  if [[ "${MONITORING_ENABLED}" != "true" && "${PROMETHEUS_RULE_ENABLED}" == "true" ]]; then
+    PROMETHEUS_RULE_ENABLED="false"
+  fi
+
   if [[ "${ACTION}" == "addon-install" || "${ACTION}" == "addon-uninstall" ]]; then
     normalize_addons
     SERVICE_MONITOR_ENABLED="false"
+    PROMETHEUS_RULE_ENABLED="false"
 
     if addon_selected service-monitor && ! addon_selected monitoring && [[ "${ACTION}" == "addon-install" ]]; then
       warn "service-monitor 依赖 monitoring，已自动补齐 monitoring"
@@ -386,6 +396,10 @@ resolve_feature_dependencies() {
 
     if addon_selected service-monitor; then
       SERVICE_MONITOR_ENABLED="true"
+    fi
+
+    if addon_selected monitoring; then
+      PROMETHEUS_RULE_ENABLED="true"
     fi
   fi
 }

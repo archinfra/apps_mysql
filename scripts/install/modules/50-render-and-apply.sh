@@ -194,6 +194,7 @@ render_feature_blocks() {
   cat "${file_path}" \
     | render_optional_block "FEATURE_MONITORING" "${MONITORING_ENABLED}" \
     | render_optional_block "FEATURE_SERVICE_MONITOR" "${SERVICE_MONITOR_ENABLED}" \
+    | render_optional_block "FEATURE_PROMETHEUS_RULE" "${PROMETHEUS_RULE_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
     | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
     | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
@@ -225,6 +226,11 @@ cleanup_disabled_optional_resources() {
 
   if [[ "${SERVICE_MONITOR_ENABLED}" != "true" ]] && cluster_supports_service_monitor; then
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${PROMETHEUS_RULE_ENABLED}" != "true" ]] && cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
   fi
 
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
@@ -313,6 +319,8 @@ template_replace() {
     -e "s#__METRICS_SERVICE_NAME__#${METRICS_SERVICE_NAME}#g" \
     -e "s#__METRICS_PORT__#${METRICS_PORT}#g" \
     -e "s#__SERVICE_MONITOR_NAME__#${SERVICE_MONITOR_NAME}#g" \
+    -e "s#__PROMETHEUS_RULE_NAME__#${PROMETHEUS_RULE_NAME}#g" \
+    -e "s#__GRAFANA_DASHBOARD_NAME__#${GRAFANA_DASHBOARD_NAME}#g" \
     -e "s#__SERVICE_MONITOR_INTERVAL__#${SERVICE_MONITOR_INTERVAL}#g" \
     -e "s#__SERVICE_MONITOR_SCRAPE_TIMEOUT__#${SERVICE_MONITOR_SCRAPE_TIMEOUT}#g" \
     -e "s#__ADDON_EXPORTER_DEPLOYMENT_NAME__#${ADDON_EXPORTER_DEPLOYMENT_NAME}#g" \
@@ -322,6 +330,8 @@ template_replace() {
     -e "s#__ADDON_EXPORTER_PASSWORD__#${ADDON_EXPORTER_PASSWORD}#g" \
     -e "s#__ADDON_MONITORING_TARGET__#${ADDON_MONITORING_TARGET}#g" \
     -e "s#__ADDON_SERVICE_MONITOR_NAME__#${ADDON_SERVICE_MONITOR_NAME}#g" \
+    -e "s#__ADDON_PROMETHEUS_RULE_NAME__#${ADDON_PROMETHEUS_RULE_NAME}#g" \
+    -e "s#__ADDON_GRAFANA_DASHBOARD_NAME__#${ADDON_GRAFANA_DASHBOARD_NAME}#g" \
     -e "s#__FLUENTBIT_CONFIGMAP__#${FLUENTBIT_CONFIGMAP}#g" \
     -e "s#__MYSQL_SLOW_QUERY_TIME__#${MYSQL_SLOW_QUERY_TIME}#g" \
     -e "s#__MYSQL_HOST__#${MYSQL_HOST}#g" \

@@ -14,6 +14,10 @@ uninstall_addons() {
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
   fi
 
+  if addon_selected monitoring && cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+  fi
+
   if addon_selected monitoring; then
     section "移除 monitoring addon"
     delete_external_monitoring_resources
@@ -28,6 +32,8 @@ show_addon_status() {
   local embedded_logging="未安装"
   local addon_service_monitor="未安装"
   local embedded_service_monitor="未安装"
+  local addon_prometheus_rule="未安装"
+  local embedded_prometheus_rule="未安装"
 
   require_namespace_exists
 
@@ -46,11 +52,21 @@ show_addon_status() {
     embedded_service_monitor="集群未安装 CRD"
   fi
 
+  if cluster_supports_prometheus_rule; then
+    resource_exists prometheusrule "${ADDON_PROMETHEUS_RULE_NAME}" && addon_prometheus_rule="已安装"
+    resource_exists prometheusrule "${PROMETHEUS_RULE_NAME}" && embedded_prometheus_rule="已安装"
+  else
+    addon_prometheus_rule="集群未安装 CRD"
+    embedded_prometheus_rule="集群未安装 CRD"
+  fi
+
   section "Addon 状态"
   echo "外置 monitoring addon   : ${external_monitoring}"
   echo "内嵌 monitoring sidecar : ${embedded_monitoring}"
   echo "外置 ServiceMonitor     : ${addon_service_monitor}"
   echo "内嵌 ServiceMonitor     : ${embedded_service_monitor}"
+  echo "外置 PrometheusRule     : ${addon_prometheus_rule}"
+  echo "内嵌 PrometheusRule     : ${embedded_prometheus_rule}"
   echo "Fluent Bit sidecar      : ${embedded_logging}"
   echo
   echo "推荐结论:"
@@ -78,6 +94,10 @@ show_status() {
     kubectl get servicemonitor -n "${NAMESPACE}" || true
     echo
   fi
+  if cluster_supports_prometheus_rule; then
+    kubectl get prometheusrule -n "${NAMESPACE}" || true
+    echo
+  fi
   kubectl get jobs -n "${NAMESPACE}" || true
 }
 
@@ -101,6 +121,9 @@ uninstall_app() {
   if ! cluster_supports_service_monitor; then
     SERVICE_MONITOR_ENABLED="false"
   fi
+  if ! cluster_supports_prometheus_rule; then
+    PROMETHEUS_RULE_ENABLED="false"
+  fi
 
   render_manifest "${MYSQL_MANIFEST}" | kubectl delete -n "${NAMESPACE}" --ignore-not-found -f - >/dev/null || true
   delete_external_monitoring_resources
@@ -111,6 +134,10 @@ uninstall_app() {
   if cluster_supports_service_monitor; then
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
     kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+  if cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
   fi
   delete_pvcs_if_requested
 
@@ -126,6 +153,11 @@ install_app() {
   if [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && ! cluster_supports_service_monitor; then
     warn "集群中未安装 ServiceMonitor CRD，本次跳过 ServiceMonitor 资源"
     SERVICE_MONITOR_ENABLED="false"
+  fi
+
+  if [[ "${PROMETHEUS_RULE_ENABLED}" == "true" ]] && ! cluster_supports_prometheus_rule; then
+    warn "集群中未安装 PrometheusRule CRD，本次跳过 PrometheusRule 资源"
+    PROMETHEUS_RULE_ENABLED="false"
   fi
 
   section "安装 / 对齐 MySQL"
@@ -154,6 +186,11 @@ install_addons() {
       ADDONS="${ADDONS#,}"
       ADDONS="${ADDONS%,}"
       SERVICE_MONITOR_ENABLED="false"
+    fi
+
+    if ! cluster_supports_prometheus_rule; then
+      warn "集群中未安装 PrometheusRule CRD，本次 monitoring addon 跳过告警规则"
+      PROMETHEUS_RULE_ENABLED="false"
     fi
 
     if ! resource_exists statefulset "${STS_NAME}" && [[ "${ADDON_MONITORING_TARGET_EXPLICIT}" != "true" && "${MYSQL_HOST_EXPLICIT}" != "true" ]]; then

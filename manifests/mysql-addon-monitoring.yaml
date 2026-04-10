@@ -97,3 +97,95 @@ spec:
       scrapeTimeout: __SERVICE_MONITOR_SCRAPE_TIMEOUT__
       path: /metrics
 #__FEATURE_SERVICE_MONITOR_END__
+---
+#__FEATURE_PROMETHEUS_RULE_START__
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: __ADDON_PROMETHEUS_RULE_NAME__
+  labels:
+    app: __APP_NAME__
+    addon.mysql.io/type: monitoring
+    monitoring.archinfra.io/stack: default
+spec:
+  groups:
+    - name: __APP_NAME__-addon
+      rules:
+        - alert: MySQLAddonExporterDown
+          expr: min(mysql_up{namespace="__NAMESPACE__"}) < 1
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: MySQL addon exporter is down
+            description: External MySQL monitoring addon exporter for __APP_NAME__ is down.
+        - alert: MySQLAddonConnectionsHigh
+          expr: |
+            max(mysql_global_status_threads_connected{namespace="__NAMESPACE__"})
+            /
+            clamp_min(max(mysql_global_variables_max_connections{namespace="__NAMESPACE__"}), 1)
+            * 100 > 80
+          for: 10m
+          labels:
+            severity: warning
+            category: saturation
+          annotations:
+            summary: External MySQL connection usage is high
+            description: The monitored MySQL target for addon __APP_NAME__ is using more than 80% of max_connections.
+#__FEATURE_PROMETHEUS_RULE_END__
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __ADDON_GRAFANA_DASHBOARD_NAME__
+  labels:
+    app: __APP_NAME__
+    addon.mysql.io/type: monitoring
+    grafana_dashboard: "1"
+    monitoring.archinfra.io/stack: default
+  annotations:
+    grafana_folder: Middleware/MySQL
+data:
+  mysql-addon-overview.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "panels": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+          "targets": [{"expr": "min(mysql_up{namespace=\"__NAMESPACE__\"})", "refId": "A"}],
+          "title": "MySQL Up",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+          "targets": [{"expr": "max(mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"})", "refId": "A"}],
+          "title": "Threads Connected",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+          "targets": [{"expr": "increase(mysql_global_status_slow_queries{namespace=\"__NAMESPACE__\"}[1h])", "refId": "A"}],
+          "title": "Slow Queries / 1h",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+          "targets": [{"expr": "rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m])", "refId": "A"}],
+          "title": "Query Rate",
+          "type": "stat"
+        }
+      ],
+      "schemaVersion": 39,
+      "style": "dark",
+      "tags": ["archinfra", "mysql"],
+      "templating": {"list": []},
+      "time": {"from": "now-6h", "to": "now"},
+      "title": "MySQL Addon Overview",
+      "version": 1
+    }

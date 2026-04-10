@@ -193,6 +193,178 @@ spec:
       path: /metrics
 #__FEATURE_SERVICE_MONITOR_END__
 ---
+#__FEATURE_PROMETHEUS_RULE_START__
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: __PROMETHEUS_RULE_NAME__
+  labels:
+    app: __APP_NAME__
+    monitoring.archinfra.io/stack: default
+spec:
+  groups:
+    - name: __APP_NAME__
+      rules:
+        - alert: MySQLDown
+          expr: min(mysql_up{namespace="__NAMESPACE__"}) < 1
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: MySQL exporter is down
+            description: MySQL exporter for __APP_NAME__ in namespace __NAMESPACE__ has been unavailable for more than 2 minutes.
+        - alert: MySQLConnectionsHigh
+          expr: |
+            max(mysql_global_status_threads_connected{namespace="__NAMESPACE__"})
+            /
+            clamp_min(max(mysql_global_variables_max_connections{namespace="__NAMESPACE__"}), 1)
+            * 100 > 80
+          for: 10m
+          labels:
+            severity: warning
+            category: saturation
+          annotations:
+            summary: MySQL connection usage is high
+            description: MySQL __APP_NAME__ is using more than 80% of max_connections for 10 minutes.
+        - alert: MySQLSlowQueriesHigh
+          expr: increase(mysql_global_status_slow_queries{namespace="__NAMESPACE__"}[10m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+            category: performance
+          annotations:
+            summary: MySQL slow queries detected
+            description: MySQL __APP_NAME__ has recorded slow queries in the last 10 minutes.
+#__FEATURE_PROMETHEUS_RULE_END__
+---
+#__FEATURE_MONITORING_START__
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __GRAFANA_DASHBOARD_NAME__
+  labels:
+    app: __APP_NAME__
+    grafana_dashboard: "1"
+    monitoring.archinfra.io/stack: default
+  annotations:
+    grafana_folder: Middleware/MySQL
+data:
+  mysql-overview.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": true,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+          "targets": [
+            {
+              "expr": "min(mysql_up{namespace=\"__NAMESPACE__\"})",
+              "refId": "A"
+            }
+          ],
+          "title": "MySQL Up",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+          "targets": [
+            {
+              "expr": "max(mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"})",
+              "refId": "A"
+            }
+          ],
+          "title": "Threads Connected",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+          "targets": [
+            {
+              "expr": "max(mysql_global_status_threads_running{namespace=\"__NAMESPACE__\"})",
+              "refId": "A"
+            }
+          ],
+          "title": "Threads Running",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+          "targets": [
+            {
+              "expr": "increase(mysql_global_status_slow_queries{namespace=\"__NAMESPACE__\"}[1h])",
+              "refId": "A"
+            }
+          ],
+          "title": "Slow Queries / 1h",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+          "targets": [
+            {
+              "expr": "rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m])",
+              "legendFormat": "questions/s",
+              "refId": "A"
+            }
+          ],
+          "title": "Query Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+          "targets": [
+            {
+              "expr": "max(mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"})",
+              "legendFormat": "connected",
+              "refId": "A"
+            },
+            {
+              "expr": "max(mysql_global_variables_max_connections{namespace=\"__NAMESPACE__\"})",
+              "legendFormat": "max",
+              "refId": "B"
+            }
+          ],
+          "title": "Connections",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "style": "dark",
+      "tags": ["archinfra", "mysql"],
+      "templating": {"list": []},
+      "time": {"from": "now-6h", "to": "now"},
+      "title": "MySQL Overview",
+      "version": 1
+    }
+#__FEATURE_MONITORING_END__
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
