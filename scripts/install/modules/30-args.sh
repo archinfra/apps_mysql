@@ -47,6 +47,10 @@ parse_args() {
         STORAGE_SIZE="$2"
         shift 2
         ;;
+      --resource-profile)
+        RESOURCE_PROFILE="$2"
+        shift 2
+        ;;
       --root-password)
         MYSQL_ROOT_PASSWORD="$2"
         MYSQL_ROOT_PASSWORD_EXPLICIT="true"

@@ -98,6 +98,32 @@
 - Fluent Bit sidecar: `false`
 - wait timeout: `10m`
 - target image repo: `sealos.hub:5000/kube4`
+- resource profile: `mid`
+
+### Resource profile
+
+Installer now supports:
+
+- `--resource-profile low`
+- `--resource-profile mid`
+- `--resource-profile midd`
+- `--resource-profile high`
+
+Default is `mid`. `midd` is accepted as an alias of `mid`.
+
+Profile intent:
+
+- `low`: demo or lightweight validation
+- `mid`: normal shared environment, baseline for `500-1000` concurrency and around `10000` users
+- `high`: heavier traffic or larger working set
+
+Per-profile baseline:
+
+| Profile | MySQL | Exporter | Fluent Bit | Init container |
+| --- | --- | --- | --- | --- |
+| `low` | `200m / 512Mi` request, `500m / 1Gi` limit | `50m / 64Mi` request, `100m / 128Mi` limit | `50m / 64Mi` request, `100m / 128Mi` limit | `20m / 32Mi` request, `100m / 64Mi` limit |
+| `mid` | `500m / 1Gi` request, `1 / 2Gi` limit | `100m / 128Mi` request, `200m / 256Mi` limit | `100m / 128Mi` request, `200m / 256Mi` limit | `50m / 64Mi` request, `200m / 128Mi` limit |
+| `high` | `1 / 2Gi` request, `2 / 4Gi` limit | `200m / 256Mi` request, `500m / 512Mi` limit | `200m / 256Mi` request, `500m / 512Mi` limit | `100m / 128Mi` request, `300m / 256Mi` limit |
 
 这套默认值是“单实例 MySQL + 默认开启监控 + 默认开放 NodePort”的交付方案。
 
@@ -186,21 +212,21 @@
 
 默认主容器资源：
 
-- request: `300m CPU / 500Mi memory`
+- request: `500m CPU / 1Gi memory`
 - limit: `1 CPU / 2Gi memory`
 
 ### 内嵌 exporter sidecar
 
 默认 exporter 资源：
 
-- request: `50m CPU / 64Mi memory`
+- request: `100m CPU / 128Mi memory`
 - limit: `200m CPU / 256Mi memory`
 
 ### 可选 Fluent Bit sidecar
 
 开启 `--enable-fluentbit` 后，默认资源：
 
-- request: `50m CPU / 64Mi memory`
+- request: `100m CPU / 128Mi memory`
 - limit: `200m CPU / 256Mi memory`
 
 ### 默认总量
@@ -209,14 +235,14 @@
 
 | 项目 | 默认值 |
 | --- | --- |
-| CPU request | `350m` |
-| Memory request | `564Mi` |
+| CPU request | `600m` |
+| Memory request | `1152Mi` |
 | CPU limit | `1.2` |
 | Memory limit | `2304Mi` |
 
 如果同时启用了 Fluent Bit，则额外增加：
 
-- request: `50m CPU / 64Mi memory`
+- request: `100m CPU / 128Mi memory`
 - limit: `200m CPU / 256Mi memory`
 
 ### 存储需求

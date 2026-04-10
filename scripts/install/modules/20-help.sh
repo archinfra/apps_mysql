@@ -45,6 +45,7 @@ EOF
 
 show_help_install() {
   local cmd="./mysql-installer-<arch>.run"
+  local resource_hint="  --resource-profile <name>         默认: mid，支持 low|mid|midd|high"
 
   cat <<EOF
 install 仅在 integrated 包中可用，适合:
@@ -82,6 +83,9 @@ install 仅在 integrated 包中可用，适合:
     --enable-fluentbit \
     --mysql-slow-query-time 1 \
     -y
+
+资源档位:
+${resource_hint}
 EOF
 }
 
@@ -213,6 +217,7 @@ MySQL 目标连接:
   --enable-monitoring / --disable-monitoring
   --enable-service-monitor / --disable-service-monitor
   --enable-fluentbit / --disable-fluentbit
+  --resource-profile <name>
   --mysql-slow-query-time <seconds>
 
 压测:

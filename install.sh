@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.5.10"
+APP_VERSION="1.5.12"
 PACKAGE_PROFILE="${PACKAGE_PROFILE:-integrated}"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
@@ -37,6 +37,7 @@ MYSQL_REPLICAS="1"
 MYSQL_ROOT_PASSWORD="passw0rd"
 STORAGE_CLASS="nfs"
 STORAGE_SIZE="10Gi"
+RESOURCE_PROFILE="mid"
 SERVICE_NAME="mysql"
 STS_NAME="mysql"
 AUTH_SECRET="mysql-auth"
@@ -95,6 +96,23 @@ BENCHMARK_DB="sbtest"
 BENCHMARK_RAND_TYPE="uniform"
 BENCHMARK_KEEP_DATA="false"
 BENCHMARK_PROFILE="standard"
+
+MYSQL_REQUEST_CPU="${MYSQL_REQUEST_CPU:-500m}"
+MYSQL_REQUEST_MEM="${MYSQL_REQUEST_MEM:-1Gi}"
+MYSQL_LIMIT_CPU="${MYSQL_LIMIT_CPU:-1}"
+MYSQL_LIMIT_MEM="${MYSQL_LIMIT_MEM:-2Gi}"
+MYSQL_EXPORTER_REQUEST_CPU="${MYSQL_EXPORTER_REQUEST_CPU:-100m}"
+MYSQL_EXPORTER_REQUEST_MEM="${MYSQL_EXPORTER_REQUEST_MEM:-128Mi}"
+MYSQL_EXPORTER_LIMIT_CPU="${MYSQL_EXPORTER_LIMIT_CPU:-200m}"
+MYSQL_EXPORTER_LIMIT_MEM="${MYSQL_EXPORTER_LIMIT_MEM:-256Mi}"
+FLUENTBIT_REQUEST_CPU="${FLUENTBIT_REQUEST_CPU:-100m}"
+FLUENTBIT_REQUEST_MEM="${FLUENTBIT_REQUEST_MEM:-128Mi}"
+FLUENTBIT_LIMIT_CPU="${FLUENTBIT_LIMIT_CPU:-200m}"
+FLUENTBIT_LIMIT_MEM="${FLUENTBIT_LIMIT_MEM:-256Mi}"
+MYSQL_INIT_REQUEST_CPU="${MYSQL_INIT_REQUEST_CPU:-50m}"
+MYSQL_INIT_REQUEST_MEM="${MYSQL_INIT_REQUEST_MEM:-64Mi}"
+MYSQL_INIT_LIMIT_CPU="${MYSQL_INIT_LIMIT_CPU:-200m}"
+MYSQL_INIT_LIMIT_MEM="${MYSQL_INIT_LIMIT_MEM:-128Mi}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -198,6 +216,7 @@ EOF
 
 show_help_install() {
   local cmd="./mysql-installer-<arch>.run"
+  local resource_hint="  --resource-profile <name>         默认: mid，支持 low|mid|midd|high"
 
   cat <<EOF
 install 仅在 integrated 包中可用，适合:
@@ -235,6 +254,9 @@ install 仅在 integrated 包中可用，适合:
     --enable-fluentbit \
     --mysql-slow-query-time 1 \
     -y
+
+资源档位:
+${resource_hint}
 EOF
 }
 
@@ -366,6 +388,7 @@ MySQL 目标连接:
   --enable-monitoring / --disable-monitoring
   --enable-service-monitor / --disable-service-monitor
   --enable-fluentbit / --disable-fluentbit
+  --resource-profile <name>
   --mysql-slow-query-time <seconds>
 
 压测:
@@ -662,6 +685,10 @@ parse_args() {
         ;;
       --storage-size)
         STORAGE_SIZE="$2"
+        shift 2
+        ;;
+      --resource-profile)
+        RESOURCE_PROFILE="$2"
         shift 2
         ;;
       --root-password)
@@ -1070,6 +1097,72 @@ prompt_missing_values() {
 }
 
 
+apply_resource_profile() {
+  case "${RESOURCE_PROFILE,,}" in
+    low)
+      RESOURCE_PROFILE="low"
+      MYSQL_REQUEST_CPU="200m"
+      MYSQL_REQUEST_MEM="512Mi"
+      MYSQL_LIMIT_CPU="500m"
+      MYSQL_LIMIT_MEM="1Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="50m"
+      MYSQL_EXPORTER_REQUEST_MEM="64Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="100m"
+      MYSQL_EXPORTER_LIMIT_MEM="128Mi"
+      FLUENTBIT_REQUEST_CPU="50m"
+      FLUENTBIT_REQUEST_MEM="64Mi"
+      FLUENTBIT_LIMIT_CPU="100m"
+      FLUENTBIT_LIMIT_MEM="128Mi"
+      MYSQL_INIT_REQUEST_CPU="20m"
+      MYSQL_INIT_REQUEST_MEM="32Mi"
+      MYSQL_INIT_LIMIT_CPU="100m"
+      MYSQL_INIT_LIMIT_MEM="64Mi"
+      ;;
+    mid|midd|middle|medium)
+      RESOURCE_PROFILE="mid"
+      MYSQL_REQUEST_CPU="500m"
+      MYSQL_REQUEST_MEM="1Gi"
+      MYSQL_LIMIT_CPU="1"
+      MYSQL_LIMIT_MEM="2Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="100m"
+      MYSQL_EXPORTER_REQUEST_MEM="128Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="200m"
+      MYSQL_EXPORTER_LIMIT_MEM="256Mi"
+      FLUENTBIT_REQUEST_CPU="100m"
+      FLUENTBIT_REQUEST_MEM="128Mi"
+      FLUENTBIT_LIMIT_CPU="200m"
+      FLUENTBIT_LIMIT_MEM="256Mi"
+      MYSQL_INIT_REQUEST_CPU="50m"
+      MYSQL_INIT_REQUEST_MEM="64Mi"
+      MYSQL_INIT_LIMIT_CPU="200m"
+      MYSQL_INIT_LIMIT_MEM="128Mi"
+      ;;
+    high)
+      RESOURCE_PROFILE="high"
+      MYSQL_REQUEST_CPU="1"
+      MYSQL_REQUEST_MEM="2Gi"
+      MYSQL_LIMIT_CPU="2"
+      MYSQL_LIMIT_MEM="4Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="200m"
+      MYSQL_EXPORTER_REQUEST_MEM="256Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="500m"
+      MYSQL_EXPORTER_LIMIT_MEM="512Mi"
+      FLUENTBIT_REQUEST_CPU="200m"
+      FLUENTBIT_REQUEST_MEM="256Mi"
+      FLUENTBIT_LIMIT_CPU="500m"
+      FLUENTBIT_LIMIT_MEM="512Mi"
+      MYSQL_INIT_REQUEST_CPU="100m"
+      MYSQL_INIT_REQUEST_MEM="128Mi"
+      MYSQL_INIT_LIMIT_CPU="300m"
+      MYSQL_INIT_LIMIT_MEM="256Mi"
+      ;;
+    *)
+      die "resource-profile 仅支持 low|mid|midd|high"
+      ;;
+  esac
+}
+
+
 validate_environment() {
   command -v kubectl >/dev/null 2>&1 || die "未找到 kubectl"
 
@@ -1080,6 +1173,8 @@ validate_environment() {
 
 
 validate_inputs() {
+  apply_resource_profile
+
   [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 仅支持 true 或 false"
 
   if [[ "${ACTION}" != "addon-status" ]]; then
@@ -1131,6 +1226,7 @@ print_plan() {
       fi
       echo "副本数                  : ${MYSQL_REPLICAS}"
       echo "StorageClass            : ${STORAGE_CLASS}"
+      echo "Resource profile        : ${RESOURCE_PROFILE}"
       echo "存储大小                : ${STORAGE_SIZE}"
       echo "镜像前缀                : ${REGISTRY_REPO}"
       echo "监控 exporter           : ${MONITORING_ENABLED}"
@@ -1510,6 +1606,22 @@ template_replace() {
     -e "s#__MYSQL_USER__#${MYSQL_USER}#g" \
     -e "s#__MYSQL_AUTH_SECRET__#${MYSQL_AUTH_SECRET}#g" \
     -e "s#__MYSQL_PASSWORD_KEY__#${MYSQL_PASSWORD_KEY}#g" \
+    -e "s#__MYSQL_REQUEST_CPU__#${MYSQL_REQUEST_CPU}#g" \
+    -e "s#__MYSQL_REQUEST_MEM__#${MYSQL_REQUEST_MEM}#g" \
+    -e "s#__MYSQL_LIMIT_CPU__#${MYSQL_LIMIT_CPU}#g" \
+    -e "s#__MYSQL_LIMIT_MEM__#${MYSQL_LIMIT_MEM}#g" \
+    -e "s#__MYSQL_EXPORTER_REQUEST_CPU__#${MYSQL_EXPORTER_REQUEST_CPU}#g" \
+    -e "s#__MYSQL_EXPORTER_REQUEST_MEM__#${MYSQL_EXPORTER_REQUEST_MEM}#g" \
+    -e "s#__MYSQL_EXPORTER_LIMIT_CPU__#${MYSQL_EXPORTER_LIMIT_CPU}#g" \
+    -e "s#__MYSQL_EXPORTER_LIMIT_MEM__#${MYSQL_EXPORTER_LIMIT_MEM}#g" \
+    -e "s#__FLUENTBIT_REQUEST_CPU__#${FLUENTBIT_REQUEST_CPU}#g" \
+    -e "s#__FLUENTBIT_REQUEST_MEM__#${FLUENTBIT_REQUEST_MEM}#g" \
+    -e "s#__FLUENTBIT_LIMIT_CPU__#${FLUENTBIT_LIMIT_CPU}#g" \
+    -e "s#__FLUENTBIT_LIMIT_MEM__#${FLUENTBIT_LIMIT_MEM}#g" \
+    -e "s#__MYSQL_INIT_REQUEST_CPU__#${MYSQL_INIT_REQUEST_CPU}#g" \
+    -e "s#__MYSQL_INIT_REQUEST_MEM__#${MYSQL_INIT_REQUEST_MEM}#g" \
+    -e "s#__MYSQL_INIT_LIMIT_CPU__#${MYSQL_INIT_LIMIT_CPU}#g" \
+    -e "s#__MYSQL_INIT_LIMIT_MEM__#${MYSQL_INIT_LIMIT_MEM}#g" \
     -e "s#__MYSQL_IMAGE__#${MYSQL_IMAGE}#g" \
     -e "s#__MYSQL_EXPORTER_IMAGE__#${MYSQL_EXPORTER_IMAGE}#g" \
     -e "s#__FLUENTBIT_IMAGE__#${FLUENTBIT_IMAGE}#g" \

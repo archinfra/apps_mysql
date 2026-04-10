@@ -47,6 +47,72 @@ prompt_missing_values() {
 }
 
 
+apply_resource_profile() {
+  case "${RESOURCE_PROFILE,,}" in
+    low)
+      RESOURCE_PROFILE="low"
+      MYSQL_REQUEST_CPU="200m"
+      MYSQL_REQUEST_MEM="512Mi"
+      MYSQL_LIMIT_CPU="500m"
+      MYSQL_LIMIT_MEM="1Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="50m"
+      MYSQL_EXPORTER_REQUEST_MEM="64Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="100m"
+      MYSQL_EXPORTER_LIMIT_MEM="128Mi"
+      FLUENTBIT_REQUEST_CPU="50m"
+      FLUENTBIT_REQUEST_MEM="64Mi"
+      FLUENTBIT_LIMIT_CPU="100m"
+      FLUENTBIT_LIMIT_MEM="128Mi"
+      MYSQL_INIT_REQUEST_CPU="20m"
+      MYSQL_INIT_REQUEST_MEM="32Mi"
+      MYSQL_INIT_LIMIT_CPU="100m"
+      MYSQL_INIT_LIMIT_MEM="64Mi"
+      ;;
+    mid|midd|middle|medium)
+      RESOURCE_PROFILE="mid"
+      MYSQL_REQUEST_CPU="500m"
+      MYSQL_REQUEST_MEM="1Gi"
+      MYSQL_LIMIT_CPU="1"
+      MYSQL_LIMIT_MEM="2Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="100m"
+      MYSQL_EXPORTER_REQUEST_MEM="128Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="200m"
+      MYSQL_EXPORTER_LIMIT_MEM="256Mi"
+      FLUENTBIT_REQUEST_CPU="100m"
+      FLUENTBIT_REQUEST_MEM="128Mi"
+      FLUENTBIT_LIMIT_CPU="200m"
+      FLUENTBIT_LIMIT_MEM="256Mi"
+      MYSQL_INIT_REQUEST_CPU="50m"
+      MYSQL_INIT_REQUEST_MEM="64Mi"
+      MYSQL_INIT_LIMIT_CPU="200m"
+      MYSQL_INIT_LIMIT_MEM="128Mi"
+      ;;
+    high)
+      RESOURCE_PROFILE="high"
+      MYSQL_REQUEST_CPU="1"
+      MYSQL_REQUEST_MEM="2Gi"
+      MYSQL_LIMIT_CPU="2"
+      MYSQL_LIMIT_MEM="4Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="200m"
+      MYSQL_EXPORTER_REQUEST_MEM="256Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="500m"
+      MYSQL_EXPORTER_LIMIT_MEM="512Mi"
+      FLUENTBIT_REQUEST_CPU="200m"
+      FLUENTBIT_REQUEST_MEM="256Mi"
+      FLUENTBIT_LIMIT_CPU="500m"
+      FLUENTBIT_LIMIT_MEM="512Mi"
+      MYSQL_INIT_REQUEST_CPU="100m"
+      MYSQL_INIT_REQUEST_MEM="128Mi"
+      MYSQL_INIT_LIMIT_CPU="300m"
+      MYSQL_INIT_LIMIT_MEM="256Mi"
+      ;;
+    *)
+      die "resource-profile 仅支持 low|mid|midd|high"
+      ;;
+  esac
+}
+
+
 validate_environment() {
   command -v kubectl >/dev/null 2>&1 || die "未找到 kubectl"
 
@@ -57,6 +123,8 @@ validate_environment() {
 
 
 validate_inputs() {
+  apply_resource_profile
+
   [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 仅支持 true 或 false"
 
   if [[ "${ACTION}" != "addon-status" ]]; then
@@ -108,6 +176,7 @@ print_plan() {
       fi
       echo "副本数                  : ${MYSQL_REPLICAS}"
       echo "StorageClass            : ${STORAGE_CLASS}"
+      echo "Resource profile        : ${RESOURCE_PROFILE}"
       echo "存储大小                : ${STORAGE_SIZE}"
       echo "镜像前缀                : ${REGISTRY_REPO}"
       echo "监控 exporter           : ${MONITORING_ENABLED}"

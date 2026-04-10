@@ -235,6 +235,13 @@ spec:
               mountPath: /mnt/conf.d
             - name: mysql-log
               mountPath: /mnt/mysql-log
+          resources:
+            requests:
+              cpu: __MYSQL_INIT_REQUEST_CPU__
+              memory: __MYSQL_INIT_REQUEST_MEM__
+            limits:
+              cpu: __MYSQL_INIT_LIMIT_CPU__
+              memory: __MYSQL_INIT_LIMIT_MEM__
       containers:
         - name: mysql
           image: __MYSQL_IMAGE__
@@ -299,11 +306,11 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 300m
-              memory: 500Mi
+              cpu: __MYSQL_REQUEST_CPU__
+              memory: __MYSQL_REQUEST_MEM__
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: __MYSQL_LIMIT_CPU__
+              memory: __MYSQL_LIMIT_MEM__
 #__FEATURE_MONITORING_START__
         - name: mysqld-exporter
           image: __MYSQL_EXPORTER_IMAGE__
@@ -331,11 +338,11 @@ spec:
               containerPort: __METRICS_PORT__
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: __MYSQL_EXPORTER_REQUEST_CPU__
+              memory: __MYSQL_EXPORTER_REQUEST_MEM__
             limits:
-              cpu: 200m
-              memory: 256Mi
+              cpu: __MYSQL_EXPORTER_LIMIT_CPU__
+              memory: __MYSQL_EXPORTER_LIMIT_MEM__
 #__FEATURE_MONITORING_END__
 #__FEATURE_FLUENTBIT_START__
         - name: fluent-bit
@@ -351,11 +358,11 @@ spec:
               mountPath: /fluent-bit/etc
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: __FLUENTBIT_REQUEST_CPU__
+              memory: __FLUENTBIT_REQUEST_MEM__
             limits:
-              cpu: 200m
-              memory: 256Mi
+              cpu: __FLUENTBIT_LIMIT_CPU__
+              memory: __FLUENTBIT_LIMIT_MEM__
 #__FEATURE_FLUENTBIT_END__
       volumes:
         - name: init-users
