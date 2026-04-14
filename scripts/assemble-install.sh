@@ -4,17 +4,30 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODULE_ROOT="${ROOT_DIR}/scripts/install/modules"
+VERSION_FILE="${ROOT_DIR}/VERSION"
 OUTPUT_FILE="${1:-${ROOT_DIR}/install.sh}"
 TMP_FILE="$(mktemp)"
+RENDERED_FILE="$(mktemp)"
 
 cleanup() {
-  rm -f "${TMP_FILE}" >/dev/null 2>&1 || true
+  rm -f "${TMP_FILE}" "${RENDERED_FILE}" >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT
 
 [[ -d "${MODULE_ROOT}" ]] || {
   echo "module directory not found: ${MODULE_ROOT}" >&2
+  exit 1
+}
+
+[[ -f "${VERSION_FILE}" ]] || {
+  echo "VERSION file not found: ${VERSION_FILE}" >&2
+  exit 1
+}
+
+APP_VERSION="$(tr -d '\r\n' < "${VERSION_FILE}")"
+[[ -n "${APP_VERSION}" ]] || {
+  echo "VERSION file is empty: ${VERSION_FILE}" >&2
   exit 1
 }
 
@@ -37,6 +50,8 @@ for ((i=0; i<${#modules[@]}; i++)); do
   fi
 done
 
-mv "${TMP_FILE}" "${OUTPUT_FILE}"
+sed "s/__APP_VERSION__/$(printf '%s' "${APP_VERSION}" | sed 's/[\\/&]/\\\\&/g')/g" "${TMP_FILE}" > "${RENDERED_FILE}"
+
+mv "${RENDERED_FILE}" "${OUTPUT_FILE}"
 chmod +x "${OUTPUT_FILE}"
 trap - EXIT

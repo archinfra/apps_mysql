@@ -1,0 +1,229 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px', 'primaryColor': '#326ce5', 'primaryTextColor': '#fff', 'primaryBorderColor': '#326ce5', 'lineColor': '#555', 'secondaryColor': '#326ce522', 'tertiaryColor': '#f5a623', 'clusterBkg': '#f0f4ff', 'clusterBorder': '#326ce5', 'edgeLabelBackground': '#fff'}}}%%
+
+graph TB
+    %% =====================================================================
+    %%  🌐 外部访问层
+    %% =====================================================================
+    subgraph EXTERNAL_ACCESS["🌐 外部访问层"]
+        direction LR
+        USERS["👥 用户 / 客户端"]
+        CDN["☁️ CDN / DNS"]
+    end
+
+    %% =====================================================================
+    %%  🔀 Nginx 反向代理集群（推荐：Bare Metal 部署）
+    %% =====================================================================
+    subgraph NGINX_CLUSTER["🔀 Nginx 集群 — Bare Metal 部署"]
+        direction TB
+        VIP["🟡 VIP / Keepalived<br/>192.168.x.100"]
+
+        subgraph NGINX_NODES["Nginx 节点"]
+            direction LR
+            NGINX1["Nginx-1<br/>configs: /etc/nginx/conf.d<br/>⬇ auto-reload via inotify"]
+            NGINX2["Nginx-2<br/>configs: /etc/nginx/conf.d<br/>⬇ auto-reload via inotify"]
+        end
+
+        subgraph NGINX_CONFIG["配置管理"]
+            direction LR
+            GITCONFIG["Git 仓库 / CI/CD<br/>推送配置变更"]
+            CONFIGMAP["K8s ConfigMap 同步<br/>或 shared NFS 目录"]
+        end
+    end
+
+    %% =====================================================================
+    %%  ☸️ Kubernetes 集群
+    %% =====================================================================
+    subgraph K8S_CLUSTER["☸️ Kubernetes 多节点集群"]
+
+        %% -----------------------------------------------------------------
+        %%  Master 节点
+        %% -----------------------------------------------------------------
+        subgraph MASTER_LAYER["🖥️ Master 节点层"]
+            direction LR
+
+            subgraph MASTER1["Master 1 — 控制平面 + 默认 NFS 存储"]
+                M1_API["kube-apiserver"]
+                M1_ETCD["etcd"]
+                M1_SCHED["kube-scheduler"]
+                M1_CTRL["kube-controller-manager"]
+                M1_NFS["📦 NFS 默认存储<br/>/data/nfs-share<br/>─────────<br/>nfs-client StorageClass<br/>（集群默认存储）"]
+            end
+
+            subgraph MASTER2["Master 2 — 控制平面 + 备份 NFS"]
+                M2_API["kube-apiserver"]
+                M2_ETCD["etcd"]
+                M2_SCHED["kube-scheduler"]
+                M2_CTRL["kube-controller-manager"]
+                M2_NFS["💾 NFS 备份服务器<br/>/data/nfs-backup<br/>─────────<br/>CronJob 备份目标"]
+            end
+        end
+
+        %% -----------------------------------------------------------------
+        %%  Worker 节点
+        %% -----------------------------------------------------------------
+        subgraph WORKER_LAYER["⚙️ Worker 节点层"]
+            direction LR
+            subgraph WORKER1["Worker Node 1"]
+                W1_KUBELET["kubelet"]
+                W1_PODS["Pods ..."]
+            end
+            subgraph WORKER2["Worker Node 2"]
+                W2_KUBELET["kubelet"]
+                W2_PODS["Pods ..."]
+            end
+            subgraph WORKER_N["Worker Node N ..."]
+                WN_KUBELET["kubelet"]
+                WN_PODS["Pods ..."]
+            end
+        end
+
+        %% -----------------------------------------------------------------
+        %%  namespace: default — 中间件层
+        %% -----------------------------------------------------------------
+        subgraph NS_DEFAULT["📋 namespace: default — 基础中间件"]
+            direction TB
+
+            subgraph MYSQL_STS["🐘 MySQL — StatefulSet"]
+                MYSQL_M["MySQL-Master<br/>3306<br/>PVC ← NFS 默认存储"]
+                MYSQL_S["MySQL-Slave<br/>3306<br/>PVC ← NFS 默认存储"]
+            end
+
+            subgraph REDIS_CLUSTER["🔴 Redis Cluster"]
+                REDIS_1["Redis-Node-1<br/>6379"]
+                REDIS_2["Redis-Node-2<br/>6379"]
+                REDIS_3["Redis-Node-3<br/>6379<br/>PVC ← NFS 默认存储"]
+            end
+
+            subgraph MINIO_CLUSTER["📦 MinIO 分布式集群"]
+                MINIO_1["MinIO-1<br/>9000/API<br/>PVC ← NFS 默认存储"]
+                MINIO_2["MinIO-2<br/>9000/API<br/>PVC ← NFS 默认存储"]
+                MINIO_3["MinIO-3<br/>9000/API<br/>PVC ← NFS 默认存储"]
+                MINIO_4["MinIO-4<br/>9000/API<br/>PVC ← NFS 默认存储"]
+            end
+
+            subgraph MILVUS_CLUSTER["🧠 Milvus 向量数据库集群"]
+                MILVUS_COORD["Milvus-Coordinator<br/>19530"]
+                MILVUS_QN1["QueryNode-1<br/>PVC ← NFS 默认存储"]
+                MILVUS_QN2["QueryNode-2<br/>PVC ← NFS 默认存储"]
+                MILVUS_DN["DataNode<br/>etcd + MinIO"]
+            end
+        end
+
+        %% -----------------------------------------------------------------
+        %%  namespace: aict — 自研应用层
+        %% -----------------------------------------------------------------
+        subgraph NS_AICT["🚀 namespace: aict — 自研应用"]
+            direction LR
+            AICT_APP1["App-1<br/>Service: ClusterIP"]
+            AICT_APP2["App-2<br/>Service: ClusterIP"]
+            AICT_APP3["App-3<br/>Service: ClusterIP"]
+            AICT_APPN["App-N ...<br/>Service: ClusterIP"]
+        end
+
+        %% -----------------------------------------------------------------
+        %%  备份系统 — CronJobs
+        %% -----------------------------------------------------------------
+        subgraph BACKUP_SYSTEM["⏰ 备份系统 — CronJobs"]
+            direction LR
+            CRON_DB["CronJob: MySQL备份<br/>schedule: 0 2 * * *"]
+            CRON_REDIS["CronJob: Redis备份<br/>schedule: 0 3 * * *"]
+            CRON_ETCD["CronJob: etcd备份<br/>schedule: 0 4 * * *"]
+            CRON_OTHER["CronJob: 其他备份<br/>schedule: 自定义"]
+        end
+    end
+
+    %% =====================================================================
+    %%  ☁️ 远程备份
+    %% =====================================================================
+    subgraph REMOTE_BACKUP["☁️ 远程备份存储"]
+        S3["S3 / 兼容对象存储<br/>─────────<br/>异地灾备<br/>生命周期策略<br/>版本控制"]
+    end
+
+    %% =====================================================================
+    %%  连接关系
+    %% =====================================================================
+
+    %% 用户 → Nginx
+    USERS ==>|"HTTPS"| CDN
+    CDN ==>|"DNS 解析"| VIP
+    VIP --> NGINX1
+    VIP --> NGINX2
+
+    %% Nginx → K8s Services
+    NGINX1 ==>|"proxy_pass<br/>Ingress / NodePort"| K8S_CLUSTER
+    NGINX2 ==>|"proxy_pass<br/>Ingress / NodePort"| K8S_CLUSTER
+
+    %% 配置管理 → Nginx
+    GITCONFIG -.->|"CI/CD 推送"| CONFIGMAP
+    CONFIGMAP -.->|"文件同步<br/>inotify + rsync"| NGINX1
+    CONFIGMAP -.->|"文件同步<br/>inotify + rsync"| NGINX2
+
+    %% NFS 默认存储 → 所有需要 PV 的工作负载
+    M1_NFS -.->|"PV/PVC 供给"| MYSQL_STS
+    M1_NFS -.->|"PV/PVC 供给"| REDIS_CLUSTER
+    M1_NFS -.->|"PV/PVC 供给"| MINIO_CLUSTER
+    M1_NFS -.->|"PV/PVC 供给"| MILVUS_CLUSTER
+
+    %% MySQL 主从
+    MYSQL_M ==>|"主从复制<br/>binlog"| MYSQL_S
+
+    %% Redis 集群
+    REDIS_1 ---|"Gossip<br/>Cluster Bus"| REDIS_2
+    REDIS_2 ---|"Gossip<br/>Cluster Bus"| REDIS_3
+    REDIS_3 ---|"Gossip<br/>Cluster Bus"| REDIS_1
+
+    %% MinIO 纠删码
+    MINIO_1 ---|"纠删码<br/>Erasure Code"| MINIO_2
+    MINIO_2 ---|"纠删码"| MINIO_3
+    MINIO_3 ---|"纠删码"| MINIO_4
+    MINIO_4 ---|"纠删码"| MINIO_1
+
+    %% Milvus 内部
+    MILVUS_COORD --> MILVUS_QN1
+    MILVUS_COORD --> MILVUS_QN2
+    MILVUS_QN1 --> MILVUS_DN
+    MILVUS_QN2 --> MILVUS_DN
+
+    %% aict 应用 → 中间件
+    AICT_APP1 -.->|"连接"| MYSQL_STS
+    AICT_APP2 -.->|"连接"| REDIS_CLUSTER
+    AICT_APP3 -.->|"连接"| MINIO_CLUSTER
+    AICT_APPN -.->|"连接"| MILVUS_CLUSTER
+    AICT_APP1 -.->|"连接"| REDIS_CLUSTER
+    AICT_APP2 -.->|"连接"| MYSQL_STS
+    AICT_APP3 -.->|"连接"| MYSQL_STS
+
+    %% Nginx → aict 应用
+    NGINX1 ==>|"路由"| AICT_APP1
+    NGINX2 ==>|"路由"| AICT_APP2
+
+    %% 备份 CronJob → NFS Backup
+    CRON_DB ==>|"mysqldump"| M2_NFS
+    CRON_REDIS ==>|"redis-cli --rdb"| M2_NFS
+    CRON_ETCD ==>|"etcdctl snapshot"| M2_NFS
+    CRON_OTHER ==>|"自定义脚本"| M2_NFS
+
+    %% NFS Backup → S3 异地
+    M2_NFS ==>|"rclone / aws s3 sync<br/>定时同步"| S3
+
+    %% Master 之间 etcd 复制
+    M1_ETCD ==>|"etcd peer<br/>Raft 共识"| M2_ETCD
+
+    %% 样式定义
+    classDef master fill:#e8f4fd,stroke:#326ce5,stroke-width:2px,color:#333
+    classDef nfs fill:#fff3cd,stroke:#f5a623,stroke-width:2px,color:#333
+    classDef middleware fill:#e8f8e8,stroke:#28a745,stroke-width:2px,color:#333
+    classDef aict fill:#f3e8ff,stroke:#7c3aed,stroke-width:2px,color:#333
+    classDef backup fill:#ffe8e8,stroke:#dc3545,stroke-width:2px,color:#333
+    classDef nginx fill:#e0f7fa,stroke:#00acc1,stroke-width:2px,color:#333
+    classDef external fill:#f5f5f5,stroke:#9e9e9e,stroke-width:2px,color:#333
+    classDef s3 fill:#fff8e1,stroke:#ff8f00,stroke-width:2px,color:#333
+
+    class MASTER1,MASTER2,M1_API,M2_API,M1_ETCD,M2_ETCD,M1_SCHED,M2_SCHED,M1_CTRL,M2_CTRL master
+    class M1_NFS,M2_NFS nfs
+    class MYSQL_STS,MYSQL_M,MYSQL_S,REDIS_CLUSTER,REDIS_1,REDIS_2,REDIS_3,MINIO_CLUSTER,MINIO_1,MINIO_2,MINIO_3,MINIO_4,MILVUS_CLUSTER,MILVUS_COORD,MILVUS_QN1,MILVUS_QN2,MILVUS_DN middleware
+    class NS_AICT,AICT_APP1,AICT_APP2,AICT_APP3,AICT_APPN aict
+    class BACKUP_SYSTEM,CRON_DB,CRON_REDIS,CRON_ETCD,CRON_OTHER backup
+    class NGINX_CLUSTER,VIP,NGINX1,NGINX2,NGINX_CONFIG,GITCONFIG,CONFIGMAP nginx
+    class EXTERNAL_ACCESS,USERS,CDN external
+    class REMOTE_BACKUP,S3 s3

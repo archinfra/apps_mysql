@@ -154,6 +154,58 @@ parse_args() {
         FLUENTBIT_ENABLED="false"
         shift
         ;;
+      --enable-data-protection)
+        DATA_PROTECTION_ENABLED="true"
+        shift
+        ;;
+      --disable-data-protection)
+        DATA_PROTECTION_ENABLED="false"
+        shift
+        ;;
+      --backup-namespace)
+        BACKUP_NAMESPACE="$2"
+        shift 2
+        ;;
+      --backup-addon-name)
+        BACKUP_ADDON_NAME="$2"
+        shift 2
+        ;;
+      --backup-source-name)
+        BACKUP_SOURCE_NAME="$2"
+        shift 2
+        ;;
+      --backup-policy-name)
+        BACKUP_POLICY_NAME="$2"
+        shift 2
+        ;;
+      --backup-auth-secret)
+        BACKUP_AUTH_SECRET="$2"
+        shift 2
+        ;;
+      --backup-storage-name|--backup-primary-storage-name)
+        BACKUP_PRIMARY_STORAGE_NAME="$2"
+        shift 2
+        ;;
+      --backup-secondary-storage-name)
+        BACKUP_SECONDARY_STORAGE_NAME="$2"
+        shift 2
+        ;;
+      --backup-retention-ref)
+        BACKUP_RETENTION_REF="$2"
+        shift 2
+        ;;
+      --backup-notification-ref)
+        BACKUP_NOTIFICATION_REF="$2"
+        shift 2
+        ;;
+      --backup-schedule)
+        BACKUP_SCHEDULE="$2"
+        shift 2
+        ;;
+      --backup-database)
+        BACKUP_DATABASE="$2"
+        shift 2
+        ;;
       --mysql-slow-query-time)
         MYSQL_SLOW_QUERY_TIME="$2"
         shift 2
@@ -366,8 +418,36 @@ cluster_supports_prometheus_rule() {
 }
 
 
+cluster_supports_data_protection() {
+  kubectl get crd backupaddons.dataprotection.archinfra.io >/dev/null 2>&1 \
+    && kubectl get crd backupsources.dataprotection.archinfra.io >/dev/null 2>&1 \
+    && kubectl get crd backupstorages.dataprotection.archinfra.io >/dev/null 2>&1 \
+    && kubectl get crd backuppolicies.dataprotection.archinfra.io >/dev/null 2>&1
+}
+
+
+resolve_data_protection_defaults() {
+  local base_name="${NAMESPACE}-${STS_NAME}"
+
+  if [[ -z "${BACKUP_SOURCE_NAME}" ]]; then
+    BACKUP_SOURCE_NAME="${base_name}"
+  fi
+
+  if [[ -z "${BACKUP_POLICY_NAME}" ]]; then
+    BACKUP_POLICY_NAME="${base_name}-backup"
+  fi
+
+  if [[ -z "${BACKUP_AUTH_SECRET}" ]]; then
+    BACKUP_AUTH_SECRET="${base_name}-auth"
+  fi
+
+  BACKUP_MYSQL_HOST="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local"
+}
+
+
 resolve_feature_dependencies() {
   resolve_mysql_runtime_defaults
+  resolve_data_protection_defaults
 
   if [[ "${MONITORING_ENABLED}" != "true" && "${SERVICE_MONITOR_ENABLED}" == "true" ]]; then
     warn "monitoring 已关闭，因此自动关闭 ServiceMonitor"

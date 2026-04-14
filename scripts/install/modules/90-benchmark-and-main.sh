@@ -52,6 +52,8 @@ kubectl get pods -n ${NAMESPACE}
 kubectl get svc -n ${NAMESPACE}
 kubectl get pvc -n ${NAMESPACE}
 $( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backupsources.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_SOURCE_NAME}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backuppolicies.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_POLICY_NAME}" )
 kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c mysql --tail=200
 $( [[ "${FLUENTBIT_ENABLED}" == "true" ]] && echo "kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c fluent-bit --tail=200" )
 
@@ -65,7 +67,8 @@ NodePort 访问地址:
 1. uninstall 时不要加 --delete-pvc
 2. namespace 与 --sts-name 保持不变
 3. 再次执行 install 即可按当前开关重新对齐
-4. 备份恢复已迁移到独立数据保护系统，请勿再从 apps_mysql 安装器里寻找相关入口
+4. MySQL 备份恢复通过 dataprotection 管理，不再单独交付 addon runner 镜像
+$( if [[ "${DATA_PROTECTION_APPLIED}" == "true" ]]; then echo "5. 已在 ${BACKUP_NAMESPACE} 注册 BackupSource/${BACKUP_SOURCE_NAME} 与 BackupPolicy/${BACKUP_POLICY_NAME}"; elif [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then echo "5. 本次未完成数据保护注册，请确认 dataprotection CRD 与 BackupStorage/${BACKUP_PRIMARY_STORAGE_NAME} 是否已就绪"; fi )
 EOF
     return 0
   fi
@@ -75,6 +78,8 @@ kubectl get pods -n ${NAMESPACE}
 kubectl get svc -n ${NAMESPACE}
 kubectl get pvc -n ${NAMESPACE}
 $( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backupsources.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_SOURCE_NAME}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backuppolicies.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_POLICY_NAME}" )
 kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c mysql --tail=200
 $( [[ "${FLUENTBIT_ENABLED}" == "true" ]] && echo "kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c fluent-bit --tail=200" )
 
@@ -88,7 +93,8 @@ NodePort 访问:
 1. uninstall 时不要加 --delete-pvc
 2. namespace 与 --sts-name 保持不变
 3. 再次执行 install 即可按当前开关重新对齐
-4. 备份恢复已迁移到独立数据保护系统，请勿再从 apps_mysql 安装器里寻找相关入口
+4. MySQL 备份恢复通过 dataprotection 管理，不再单独交付 addon runner 镜像
+$( if [[ "${DATA_PROTECTION_APPLIED}" == "true" ]]; then echo "5. 已在 ${BACKUP_NAMESPACE} 注册 BackupSource/${BACKUP_SOURCE_NAME} 与 BackupPolicy/${BACKUP_POLICY_NAME}"; elif [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then echo "5. 本次未完成数据保护注册，请确认 dataprotection CRD 与 BackupStorage/${BACKUP_PRIMARY_STORAGE_NAME} 是否已就绪"; fi )
 EOF
 }
 

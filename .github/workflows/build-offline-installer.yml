@@ -2,6 +2,11 @@ name: Build MySQL Offline Installer
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Optional release version override, such as 1.5.13 or v1.5.13
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -12,6 +17,7 @@ on:
       - ".github/workflows/build-offline-installer.yml"
       - "build.sh"
       - "install.sh"
+      - "VERSION"
       - "scripts/**"
       - "README.md"
       - "images/**"
@@ -21,6 +27,7 @@ on:
       - ".github/workflows/build-offline-installer.yml"
       - "build.sh"
       - "install.sh"
+      - "VERSION"
       - "scripts/**"
       - "README.md"
       - "images/**"
@@ -30,7 +37,58 @@ permissions:
   contents: write
 
 jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      version_tag: ${{ steps.resolve.outputs.version_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          normalize() {
+            local value="${1:-}"
+            value="${value#refs/tags/}"
+            value="${value#v}"
+            value="$(printf '%s' "${value}" | tr -d '\r\n')"
+            [[ -n "${value}" ]] || return 1
+            [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z._+-]+)*$ ]] || {
+              echo "::error::Unsupported version format: ${1}"
+              exit 1
+            }
+            printf '%s' "${value}"
+          }
+
+          version_file="$(tr -d '\r\n' < VERSION)"
+          input_version='${{ github.event.inputs.version || '' }}'
+
+          if [[ -n "${input_version}" ]]; then
+            version="$(normalize "${input_version}")"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="$(normalize "${GITHUB_REF_NAME}")"
+          else
+            version="$(normalize "${version_file}")"
+          fi
+
+          version_tag="v${version}"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "${version_tag}" ]]; then
+            echo "::error::Git tag ${GITHUB_REF_NAME} does not match VERSION (${version_tag})"
+            exit 1
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "version_tag=${version_tag}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: meta
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -74,20 +132,22 @@ jobs:
 
       - name: Build installer
         run: |
-          ./build.sh --arch "${{ matrix.arch }}" --profile "${{ matrix.profile }}"
+          ./build.sh --arch "${{ matrix.arch }}" --profile "${{ matrix.profile }}" --version "${{ needs.meta.outputs.version_tag }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.basename }}-${{ matrix.arch }}
+          name: ${{ steps.meta.outputs.basename }}-${{ needs.meta.outputs.version_tag }}-${{ matrix.arch }}
           path: |
-            dist/${{ steps.meta.outputs.basename }}-${{ matrix.arch }}.run
-            dist/${{ steps.meta.outputs.basename }}-${{ matrix.arch }}.run.sha256
+            dist/${{ steps.meta.outputs.basename }}-${{ needs.meta.outputs.version_tag }}-${{ matrix.arch }}.run
+            dist/${{ steps.meta.outputs.basename }}-${{ needs.meta.outputs.version_tag }}-${{ matrix.arch }}.run.sha256
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs:
+      - meta
+      - build
     runs-on: ubuntu-24.04
 
     steps:
@@ -100,4 +160,6 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          name: apps_mysql ${{ needs.meta.outputs.version_tag }}
+          generate_release_notes: true
           files: artifacts/*

@@ -9,7 +9,7 @@
 - 压测
 - 离线 `.run` 安装包交付
 
-从当前版本开始，备份恢复已经迁移到独立数据保护系统，不再由 `apps_mysql` 承担。
+从当前版本开始，备份恢复统一接入独立数据保护系统；`mysql-installer` 会在安装阶段自动注册 MySQL 对应的 `BackupAddon/BackupSource/BackupPolicy`，不再单独交付 addon runner 镜像。
 
 ## 这套仓库是怎么设计的
 
@@ -352,18 +352,25 @@ MySQL 默认不依赖这些组件启动：
 
 ### 备份恢复边界
 
-`apps_mysql` 已经不再承载备份恢复能力。
+`apps_mysql` 不直接执行备份恢复任务，但会负责把 MySQL 注册进独立数据保护系统。
 
 当前边界是：
 
 - 安装、监控、压测：`apps_mysql`
-- 备份恢复、多中心数据保护：独立数据保护系统
+- 备份恢复执行、多中心数据保护：独立数据保护系统
+- MySQL 备份接入注册：`mysql-installer`
 
 不要再从 `apps_mysql` 中寻找：
 
 - `backup`
 - `restore`
 - `verify-backup-restore`
+
+但可以直接通过 `install` 注册：
+
+- `BackupAddon/mysql-dump`
+- `BackupSource/<namespace>-<sts-name>`
+- `BackupPolicy/<namespace>-<sts-name>-backup`
 
 ## 常见使用场景
 
@@ -373,6 +380,7 @@ MySQL 默认不依赖这些组件启动：
 ./mysql-installer-amd64.run install \
   --namespace aict \
   --root-password 'StrongPassw0rd' \
+  --backup-storage-name minio-primary \
   -y
 ```
 
@@ -449,7 +457,7 @@ MySQL 默认不依赖这些组件启动：
 - `mysql-0` `CrashLoopBackOff`
 - `mysql-auth` Secret 不存在或密码未正确传入
 - metrics Service 存在但 exporter 没启动
-- 误把备份恢复需求交给 `apps_mysql`
+- 误以为 `apps_mysql` 会直接执行 `backup/restore`；实际仍由 dataprotection 控制器执行
 
 ## 常见排障命令
 
@@ -469,11 +477,17 @@ kubectl logs -n aict deploy/mysql-exporter --tail=200
 
 ## 构建与发布
 
+版本来源：
+
+- 仓库根目录 `VERSION`
+- GitHub Release tag 统一使用 `v<version>`，例如 `v1.5.13`
+- `install.sh` 中显示的版本、`.run` 产物名、release 附件名都由同一版本规则生成
+
 当前构建会产出：
 
-- `mysql-installer-<arch>.run`
-- `mysql-monitoring-<arch>.run`
-- `mysql-benchmark-<arch>.run`
+- `mysql-installer-v<version>-<arch>.run`
+- `mysql-monitoring-v<version>-<arch>.run`
+- `mysql-benchmark-v<version>-<arch>.run`
 
 运行时依赖：
 
@@ -485,6 +499,22 @@ GitHub Actions 负责：
 
 - `main/master` 多架构构建
 - `v*` tag 发布 release
+
+本地构建示例：
+
+```bash
+./build.sh --arch amd64 --profile integrated
+./build.sh --arch arm64 --profile monitoring --version v1.5.13
+./build.sh --arch all --profile all --version v1.5.13
+```
+
+发布 tag 版本建议流程：
+
+1. 修改根目录 `VERSION`
+2. 本地执行一次 `./build.sh --arch amd64 --profile integrated` 做 smoke build
+3. 提交代码并推送
+4. 创建并推送同版本 tag，例如 `v1.5.13`
+5. GitHub Actions 自动生成 release 并上传带版本号的 `.run` 和 `.sha256`
 ## Built-in Monitoring, Alerts, And Dashboards
 
 Default install now enables:

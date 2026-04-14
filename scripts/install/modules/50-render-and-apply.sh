@@ -163,6 +163,18 @@ ensure_namespace() {
 }
 
 
+ensure_named_namespace() {
+  local namespace_name="$1"
+
+  if kubectl get namespace "${namespace_name}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log "创建命名空间 ${namespace_name}"
+  kubectl create namespace "${namespace_name}" >/dev/null
+}
+
+
 render_optional_block() {
   local feature_name="$1"
   local enabled="$2"
@@ -186,9 +198,29 @@ render_feature_blocks() {
   local file_path="$1"
   local nodeport_enabled="${NODEPORT_ENABLED}"
   local stdout_logging_enabled="false"
+  local backup_notification_enabled="false"
+  local backup_database_enabled="false"
+  local backup_secondary_storage_enabled="false"
+  local backup_retention_enabled="false"
 
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
     stdout_logging_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_NOTIFICATION_REF}" ]]; then
+    backup_notification_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_DATABASE}" ]]; then
+    backup_database_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_SECONDARY_STORAGE_NAME}" ]]; then
+    backup_secondary_storage_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_RETENTION_REF}" ]]; then
+    backup_retention_enabled="true"
   fi
 
   cat "${file_path}" \
@@ -197,6 +229,10 @@ render_feature_blocks() {
     | render_optional_block "FEATURE_PROMETHEUS_RULE" "${PROMETHEUS_RULE_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
     | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_NOTIFICATION" "${backup_notification_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_DATABASE" "${backup_database_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_SECONDARY_STORAGE" "${backup_secondary_storage_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_RETENTION" "${backup_retention_enabled}" \
     | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
 }
 
@@ -216,6 +252,12 @@ apply_mysql_manifests() {
 apply_monitoring_addon_manifests() {
   require_manifest_file "${MONITORING_ADDON_MANIFEST}"
   render_manifest "${MONITORING_ADDON_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+
+apply_data_protection_manifests() {
+  require_manifest_file "${DATA_PROTECTION_MANIFEST}"
+  render_manifest "${DATA_PROTECTION_MANIFEST}" | kubectl apply -f -
 }
 
 
@@ -360,6 +402,18 @@ template_replace() {
     -e "s#__FLUENTBIT_IMAGE__#${FLUENTBIT_IMAGE}#g" \
     -e "s#__BUSYBOX_IMAGE__#${BUSYBOX_IMAGE}#g" \
     -e "s#__SYSBENCH_IMAGE__#${SYSBENCH_IMAGE}#g" \
+    -e "s#__BACKUP_NAMESPACE__#${BACKUP_NAMESPACE}#g" \
+    -e "s#__BACKUP_ADDON_NAME__#${BACKUP_ADDON_NAME}#g" \
+    -e "s#__BACKUP_SOURCE_NAME__#${BACKUP_SOURCE_NAME}#g" \
+    -e "s#__BACKUP_POLICY_NAME__#${BACKUP_POLICY_NAME}#g" \
+    -e "s#__BACKUP_AUTH_SECRET__#${BACKUP_AUTH_SECRET}#g" \
+    -e "s#__BACKUP_PRIMARY_STORAGE_NAME__#${BACKUP_PRIMARY_STORAGE_NAME}#g" \
+    -e "s#__BACKUP_SECONDARY_STORAGE_NAME__#${BACKUP_SECONDARY_STORAGE_NAME}#g" \
+    -e "s#__BACKUP_RETENTION_REF__#${BACKUP_RETENTION_REF}#g" \
+    -e "s#__BACKUP_NOTIFICATION_REF__#${BACKUP_NOTIFICATION_REF}#g" \
+    -e "s#__BACKUP_SCHEDULE__#${BACKUP_SCHEDULE}#g" \
+    -e "s#__BACKUP_DATABASE__#${BACKUP_DATABASE}#g" \
+    -e "s#__BACKUP_MYSQL_HOST__#${BACKUP_MYSQL_HOST}#g" \
     -e "s#__BENCHMARK_JOB_NAME__#${BENCHMARK_JOB_NAME:-mysql-benchmark}#g" \
     -e "s#__BENCHMARK_CONCURRENCY__#${BENCHMARK_THREADS}#g" \
     -e "s#__BENCHMARK_THREADS__#${BENCHMARK_THREADS}#g" \

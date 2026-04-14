@@ -36,8 +36,8 @@ help 主题:
   examples
 
 关键说明:
-  1. apps_mysql 现在只负责 MySQL 安装、监控和压测。
-  2. 备份恢复已迁移到独立数据保护系统，不再由本安装器提供。
+  1. apps_mysql 负责 MySQL 安装、监控、压测，以及与 dataprotection 的接入注册。
+  2. 备份恢复仍由独立数据保护系统执行，但 install 会自动注册 BackupAddon/BackupSource/BackupPolicy。
   3. 默认日志直接进容器 stdout/stderr，便于 kubectl logs 与平台日志采集共存。
 EOF
 }
@@ -67,6 +67,14 @@ install 仅在 integrated 包中可用，适合:
   --enable-monitoring / --disable-monitoring
   --enable-service-monitor / --disable-service-monitor
   --enable-fluentbit / --disable-fluentbit
+  --enable-data-protection / --disable-data-protection
+  --backup-namespace <ns>            默认: backup-system
+  --backup-storage-name <name>       默认: minio-primary
+  --backup-secondary-storage-name <name>
+  --backup-schedule <cron>           默认: 0 */6 * * *
+  --backup-retention-ref <name>      默认: keep-last-3
+  --backup-notification-ref <name>
+  --backup-database <name>
   --mysql-slow-query-time <seconds> 默认: 2
   --registry <repo-prefix>          例如: harbor.example.com/kube4
   --wait-timeout <duration>         默认: 10m
@@ -74,12 +82,13 @@ install 仅在 integrated 包中可用，适合:
 说明:
   1. install 会对 StatefulSet 与相关资源做声明式对齐，配置变化可能触发滚动更新。
   2. 如果只是给已有 MySQL 补监控，优先使用 addon-install。
-  3. 备份恢复已经拆到独立系统，不再通过 install 开关控制。
+  3. 如果集群已安装 dataprotection 且备份存储已就绪，install 会自动注册 MySQL 备份接入与默认策略。
 
 示例:
   ${cmd} install \
     --namespace mysql-demo \
     --root-password 'StrongPassw0rd' \
+    --backup-storage-name minio-primary \
     --enable-fluentbit \
     --mysql-slow-query-time 1 \
     -y
@@ -217,8 +226,22 @@ MySQL 目标连接:
   --enable-monitoring / --disable-monitoring
   --enable-service-monitor / --disable-service-monitor
   --enable-fluentbit / --disable-fluentbit
+  --enable-data-protection / --disable-data-protection
   --resource-profile <name>
   --mysql-slow-query-time <seconds>
+
+数据保护:
+  --backup-namespace <ns>
+  --backup-addon-name <name>
+  --backup-source-name <name>
+  --backup-policy-name <name>
+  --backup-auth-secret <name>
+  --backup-storage-name <name>
+  --backup-secondary-storage-name <name>
+  --backup-retention-ref <name>
+  --backup-notification-ref <name>
+  --backup-schedule <cron>
+  --backup-database <name>
 
 压测:
   --benchmark-profile <name>

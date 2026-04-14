@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+#!/usr/bin/env bash
 
 # Generated source layout:
 # - edit scripts/install/modules/*.sh
@@ -18,6 +21,7 @@ IMAGE_INDEX="${IMAGE_DIR}/image-index.tsv"
 MYSQL_MANIFEST="${MANIFEST_DIR}/innodb-mysql.yaml"
 BENCHMARK_MANIFEST="${MANIFEST_DIR}/mysql-benchmark-job.yaml"
 MONITORING_ADDON_MANIFEST="${MANIFEST_DIR}/mysql-addon-monitoring.yaml"
+DATA_PROTECTION_MANIFEST="${MANIFEST_DIR}/mysql-data-protection.yaml"
 
 REGISTRY_ADDR="${REGISTRY_ADDR:-sealos.hub:5000}"
 REGISTRY_USER="${REGISTRY_USER:-admin}"
@@ -63,6 +67,8 @@ MONITORING_ENABLED="true"
 SERVICE_MONITOR_ENABLED="true"
 PROMETHEUS_RULE_ENABLED="true"
 FLUENTBIT_ENABLED="false"
+DATA_PROTECTION_ENABLED="true"
+DATA_PROTECTION_APPLIED="false"
 METRICS_SERVICE_NAME="mysql-metrics"
 METRICS_PORT="9104"
 SERVICE_MONITOR_NAME="mysql-monitor"
@@ -82,6 +88,18 @@ ADDON_PROMETHEUS_RULE_NAME="mysql-exporter-alerts"
 ADDON_GRAFANA_DASHBOARD_NAME="mysql-exporter-dashboard"
 FLUENTBIT_CONFIGMAP="mysql-fluent-bit"
 MYSQL_SLOW_QUERY_TIME="2"
+BACKUP_NAMESPACE="backup-system"
+BACKUP_ADDON_NAME="mysql-dump"
+BACKUP_SOURCE_NAME=""
+BACKUP_POLICY_NAME=""
+BACKUP_AUTH_SECRET=""
+BACKUP_PRIMARY_STORAGE_NAME="minio-primary"
+BACKUP_SECONDARY_STORAGE_NAME=""
+BACKUP_RETENTION_REF="keep-last-3"
+BACKUP_NOTIFICATION_REF=""
+BACKUP_SCHEDULE="0 */6 * * *"
+BACKUP_DATABASE=""
+BACKUP_MYSQL_HOST=""
 WAIT_TIMEOUT="10m"
 WAIT_TIMEOUT_EXPLICIT="false"
 AUTO_YES="false"
@@ -212,8 +230,8 @@ help 主题:
   examples
 
 关键说明:
-  1. apps_mysql 现在只负责 MySQL 安装、监控和压测。
-  2. 备份恢复已迁移到独立数据保护系统，不再由本安装器提供。
+  1. apps_mysql 负责 MySQL 安装、监控、压测，以及与 dataprotection 的接入注册。
+  2. 备份恢复仍由独立数据保护系统执行，但 install 会自动注册 BackupAddon/BackupSource/BackupPolicy。
   3. 默认日志直接进容器 stdout/stderr，便于 kubectl logs 与平台日志采集共存。
 EOF
 }
@@ -243,6 +261,14 @@ install 仅在 integrated 包中可用，适合:
   --enable-monitoring / --disable-monitoring
   --enable-service-monitor / --disable-service-monitor
   --enable-fluentbit / --disable-fluentbit
+  --enable-data-protection / --disable-data-protection
+  --backup-namespace <ns>            默认: backup-system
+  --backup-storage-name <name>       默认: minio-primary
+  --backup-secondary-storage-name <name>
+  --backup-schedule <cron>           默认: 0 */6 * * *
+  --backup-retention-ref <name>      默认: keep-last-3
+  --backup-notification-ref <name>
+  --backup-database <name>
   --mysql-slow-query-time <seconds> 默认: 2
   --registry <repo-prefix>          例如: harbor.example.com/kube4
   --wait-timeout <duration>         默认: 10m
@@ -250,12 +276,13 @@ install 仅在 integrated 包中可用，适合:
 说明:
   1. install 会对 StatefulSet 与相关资源做声明式对齐，配置变化可能触发滚动更新。
   2. 如果只是给已有 MySQL 补监控，优先使用 addon-install。
-  3. 备份恢复已经拆到独立系统，不再通过 install 开关控制。
+  3. 如果集群已安装 dataprotection 且备份存储已就绪，install 会自动注册 MySQL 备份接入与默认策略。
 
 示例:
   ${cmd} install \
     --namespace mysql-demo \
     --root-password 'StrongPassw0rd' \
+    --backup-storage-name minio-primary \
     --enable-fluentbit \
     --mysql-slow-query-time 1 \
     -y
@@ -393,8 +420,22 @@ MySQL 目标连接:
   --enable-monitoring / --disable-monitoring
   --enable-service-monitor / --disable-service-monitor
   --enable-fluentbit / --disable-fluentbit
+  --enable-data-protection / --disable-data-protection
   --resource-profile <name>
   --mysql-slow-query-time <seconds>
+
+数据保护:
+  --backup-namespace <ns>
+  --backup-addon-name <name>
+  --backup-source-name <name>
+  --backup-policy-name <name>
+  --backup-auth-secret <name>
+  --backup-storage-name <name>
+  --backup-secondary-storage-name <name>
+  --backup-retention-ref <name>
+  --backup-notification-ref <name>
+  --backup-schedule <cron>
+  --backup-database <name>
 
 压测:
   --benchmark-profile <name>
@@ -799,6 +840,58 @@ parse_args() {
         FLUENTBIT_ENABLED="false"
         shift
         ;;
+      --enable-data-protection)
+        DATA_PROTECTION_ENABLED="true"
+        shift
+        ;;
+      --disable-data-protection)
+        DATA_PROTECTION_ENABLED="false"
+        shift
+        ;;
+      --backup-namespace)
+        BACKUP_NAMESPACE="$2"
+        shift 2
+        ;;
+      --backup-addon-name)
+        BACKUP_ADDON_NAME="$2"
+        shift 2
+        ;;
+      --backup-source-name)
+        BACKUP_SOURCE_NAME="$2"
+        shift 2
+        ;;
+      --backup-policy-name)
+        BACKUP_POLICY_NAME="$2"
+        shift 2
+        ;;
+      --backup-auth-secret)
+        BACKUP_AUTH_SECRET="$2"
+        shift 2
+        ;;
+      --backup-storage-name|--backup-primary-storage-name)
+        BACKUP_PRIMARY_STORAGE_NAME="$2"
+        shift 2
+        ;;
+      --backup-secondary-storage-name)
+        BACKUP_SECONDARY_STORAGE_NAME="$2"
+        shift 2
+        ;;
+      --backup-retention-ref)
+        BACKUP_RETENTION_REF="$2"
+        shift 2
+        ;;
+      --backup-notification-ref)
+        BACKUP_NOTIFICATION_REF="$2"
+        shift 2
+        ;;
+      --backup-schedule)
+        BACKUP_SCHEDULE="$2"
+        shift 2
+        ;;
+      --backup-database)
+        BACKUP_DATABASE="$2"
+        shift 2
+        ;;
       --mysql-slow-query-time)
         MYSQL_SLOW_QUERY_TIME="$2"
         shift 2
@@ -1011,8 +1104,36 @@ cluster_supports_prometheus_rule() {
 }
 
 
+cluster_supports_data_protection() {
+  kubectl get crd backupaddons.dataprotection.archinfra.io >/dev/null 2>&1 \
+    && kubectl get crd backupsources.dataprotection.archinfra.io >/dev/null 2>&1 \
+    && kubectl get crd backupstorages.dataprotection.archinfra.io >/dev/null 2>&1 \
+    && kubectl get crd backuppolicies.dataprotection.archinfra.io >/dev/null 2>&1
+}
+
+
+resolve_data_protection_defaults() {
+  local base_name="${NAMESPACE}-${STS_NAME}"
+
+  if [[ -z "${BACKUP_SOURCE_NAME}" ]]; then
+    BACKUP_SOURCE_NAME="${base_name}"
+  fi
+
+  if [[ -z "${BACKUP_POLICY_NAME}" ]]; then
+    BACKUP_POLICY_NAME="${base_name}-backup"
+  fi
+
+  if [[ -z "${BACKUP_AUTH_SECRET}" ]]; then
+    BACKUP_AUTH_SECRET="${base_name}-auth"
+  fi
+
+  BACKUP_MYSQL_HOST="${STS_NAME}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local"
+}
+
+
 resolve_feature_dependencies() {
   resolve_mysql_runtime_defaults
+  resolve_data_protection_defaults
 
   if [[ "${MONITORING_ENABLED}" != "true" && "${SERVICE_MONITOR_ENABLED}" == "true" ]]; then
     warn "monitoring 已关闭，因此自动关闭 ServiceMonitor"
@@ -1194,13 +1315,14 @@ validate_environment() {
 validate_inputs() {
   apply_resource_profile
 
-  [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 仅支持 true 或 false"
+  [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 只支持 true 或 false"
+  [[ "${DATA_PROTECTION_ENABLED}" =~ ^(true|false)$ ]] || die "--enable-data-protection / --disable-data-protection only accepts boolean switches"
 
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
     if [[ "${NODEPORT_ENABLED}" == "true" ]]; then
       [[ "${NODE_PORT}" =~ ^[0-9]+$ ]] || die "nodePort 必须是数字"
-      (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须在 30000-32767 之间"
+      (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须位于 30000-32767 之间"
     fi
   fi
 
@@ -1213,6 +1335,17 @@ validate_inputs() {
   [[ "${BENCHMARK_TABLE_SIZE}" =~ ^[0-9]+$ ]] || die "压测单表数据量必须是数字"
   [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
   [[ "${BENCHMARK_PROFILE}" =~ ^(standard|oltp-point-select|oltp-read-only|oltp-read-write)$ ]] || die "benchmark-profile 仅支持 standard、oltp-point-select、oltp-read-only、oltp-read-write"
+
+  if [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then
+    [[ -n "${BACKUP_NAMESPACE}" ]] || die "--backup-namespace cannot be empty"
+    [[ -n "${BACKUP_ADDON_NAME}" ]] || die "--backup-addon-name cannot be empty"
+    [[ -n "${BACKUP_SOURCE_NAME}" ]] || die "--backup-source-name cannot be empty"
+    [[ -n "${BACKUP_POLICY_NAME}" ]] || die "--backup-policy-name cannot be empty"
+    [[ -n "${BACKUP_AUTH_SECRET}" ]] || die "--backup-auth-secret cannot be empty"
+    [[ -n "${BACKUP_PRIMARY_STORAGE_NAME}" ]] || die "--backup-storage-name cannot be empty"
+    [[ -n "${BACKUP_RETENTION_REF}" ]] || die "--backup-retention-ref cannot be empty"
+    [[ -n "${BACKUP_SCHEDULE}" ]] || die "--backup-schedule cannot be empty"
+  fi
 
   validate_action_feature_gates
 }
@@ -1251,6 +1384,24 @@ print_plan() {
       echo "监控 exporter           : ${MONITORING_ENABLED}"
       echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
       echo "Fluent Bit sidecar      : ${FLUENTBIT_ENABLED}"
+      echo "Data protection         : ${DATA_PROTECTION_ENABLED}"
+      if [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then
+        echo "Backup namespace        : ${BACKUP_NAMESPACE}"
+        echo "Backup source           : ${BACKUP_SOURCE_NAME}"
+        echo "Backup policy           : ${BACKUP_POLICY_NAME}"
+        echo "Primary backup storage  : ${BACKUP_PRIMARY_STORAGE_NAME}"
+        if [[ -n "${BACKUP_SECONDARY_STORAGE_NAME}" ]]; then
+          echo "Secondary backup store  : ${BACKUP_SECONDARY_STORAGE_NAME}"
+        fi
+        echo "Backup retention        : ${BACKUP_RETENTION_REF}"
+        echo "Backup schedule         : ${BACKUP_SCHEDULE}"
+        if [[ -n "${BACKUP_NOTIFICATION_REF}" ]]; then
+          echo "Backup notification     : ${BACKUP_NOTIFICATION_REF}"
+        fi
+        if [[ -n "${BACKUP_DATABASE}" ]]; then
+          echo "Backup database         : ${BACKUP_DATABASE}"
+        fi
+      fi
       echo "慢日志阈值(秒)           : ${MYSQL_SLOW_QUERY_TIME}"
       echo "业务影响                : install 会整体对齐 StatefulSet，配置变化时可能触发滚动更新"
       ;;
@@ -1459,6 +1610,18 @@ ensure_namespace() {
 }
 
 
+ensure_named_namespace() {
+  local namespace_name="$1"
+
+  if kubectl get namespace "${namespace_name}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log "创建命名空间 ${namespace_name}"
+  kubectl create namespace "${namespace_name}" >/dev/null
+}
+
+
 render_optional_block() {
   local feature_name="$1"
   local enabled="$2"
@@ -1482,9 +1645,29 @@ render_feature_blocks() {
   local file_path="$1"
   local nodeport_enabled="${NODEPORT_ENABLED}"
   local stdout_logging_enabled="false"
+  local backup_notification_enabled="false"
+  local backup_database_enabled="false"
+  local backup_secondary_storage_enabled="false"
+  local backup_retention_enabled="false"
 
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
     stdout_logging_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_NOTIFICATION_REF}" ]]; then
+    backup_notification_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_DATABASE}" ]]; then
+    backup_database_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_SECONDARY_STORAGE_NAME}" ]]; then
+    backup_secondary_storage_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_RETENTION_REF}" ]]; then
+    backup_retention_enabled="true"
   fi
 
   cat "${file_path}" \
@@ -1493,6 +1676,10 @@ render_feature_blocks() {
     | render_optional_block "FEATURE_PROMETHEUS_RULE" "${PROMETHEUS_RULE_ENABLED}" \
     | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
     | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_NOTIFICATION" "${backup_notification_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_DATABASE" "${backup_database_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_SECONDARY_STORAGE" "${backup_secondary_storage_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_RETENTION" "${backup_retention_enabled}" \
     | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
 }
 
@@ -1512,6 +1699,12 @@ apply_mysql_manifests() {
 apply_monitoring_addon_manifests() {
   require_manifest_file "${MONITORING_ADDON_MANIFEST}"
   render_manifest "${MONITORING_ADDON_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+
+apply_data_protection_manifests() {
+  require_manifest_file "${DATA_PROTECTION_MANIFEST}"
+  render_manifest "${DATA_PROTECTION_MANIFEST}" | kubectl apply -f -
 }
 
 
@@ -1656,6 +1849,18 @@ template_replace() {
     -e "s#__FLUENTBIT_IMAGE__#${FLUENTBIT_IMAGE}#g" \
     -e "s#__BUSYBOX_IMAGE__#${BUSYBOX_IMAGE}#g" \
     -e "s#__SYSBENCH_IMAGE__#${SYSBENCH_IMAGE}#g" \
+    -e "s#__BACKUP_NAMESPACE__#${BACKUP_NAMESPACE}#g" \
+    -e "s#__BACKUP_ADDON_NAME__#${BACKUP_ADDON_NAME}#g" \
+    -e "s#__BACKUP_SOURCE_NAME__#${BACKUP_SOURCE_NAME}#g" \
+    -e "s#__BACKUP_POLICY_NAME__#${BACKUP_POLICY_NAME}#g" \
+    -e "s#__BACKUP_AUTH_SECRET__#${BACKUP_AUTH_SECRET}#g" \
+    -e "s#__BACKUP_PRIMARY_STORAGE_NAME__#${BACKUP_PRIMARY_STORAGE_NAME}#g" \
+    -e "s#__BACKUP_SECONDARY_STORAGE_NAME__#${BACKUP_SECONDARY_STORAGE_NAME}#g" \
+    -e "s#__BACKUP_RETENTION_REF__#${BACKUP_RETENTION_REF}#g" \
+    -e "s#__BACKUP_NOTIFICATION_REF__#${BACKUP_NOTIFICATION_REF}#g" \
+    -e "s#__BACKUP_SCHEDULE__#${BACKUP_SCHEDULE}#g" \
+    -e "s#__BACKUP_DATABASE__#${BACKUP_DATABASE}#g" \
+    -e "s#__BACKUP_MYSQL_HOST__#${BACKUP_MYSQL_HOST}#g" \
     -e "s#__BENCHMARK_JOB_NAME__#${BENCHMARK_JOB_NAME:-mysql-benchmark}#g" \
     -e "s#__BENCHMARK_CONCURRENCY__#${BENCHMARK_THREADS}#g" \
     -e "s#__BENCHMARK_THREADS__#${BENCHMARK_THREADS}#g" \
@@ -2009,6 +2214,97 @@ monitoring_bootstrap_auth_available() {
 }
 
 
+data_protection_resource_exists() {
+  local resource_name="$1"
+  local object_name="$2"
+
+  kubectl get "${resource_name}.dataprotection.archinfra.io" -n "${BACKUP_NAMESPACE}" "${object_name}" >/dev/null 2>&1
+}
+
+
+resolve_mysql_backup_password() {
+  if [[ "${MYSQL_ROOT_PASSWORD_EXPLICIT}" == "true" ]]; then
+    printf '%s' "${MYSQL_ROOT_PASSWORD}"
+    return 0
+  fi
+
+  kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' 2>/dev/null | base64 --decode
+}
+
+
+prepare_data_protection_integration() {
+  [[ "${DATA_PROTECTION_ENABLED}" == "true" ]] || return 1
+
+  if ! cluster_supports_data_protection; then
+    warn "dataprotection CRDs are not installed; skipping MySQL data protection registration"
+    return 1
+  fi
+
+  ensure_named_namespace "${BACKUP_NAMESPACE}"
+
+  if ! data_protection_resource_exists "backupstorages" "${BACKUP_PRIMARY_STORAGE_NAME}"; then
+    warn "BackupStorage/${BACKUP_PRIMARY_STORAGE_NAME} was not found; skipping MySQL data protection registration"
+    return 1
+  fi
+
+  if [[ -n "${BACKUP_SECONDARY_STORAGE_NAME}" ]] && ! data_protection_resource_exists "backupstorages" "${BACKUP_SECONDARY_STORAGE_NAME}"; then
+    warn "BackupStorage/${BACKUP_SECONDARY_STORAGE_NAME} was not found; skipping secondary backup storage"
+    BACKUP_SECONDARY_STORAGE_NAME=""
+  fi
+
+  if [[ -n "${BACKUP_RETENTION_REF}" ]] && ! data_protection_resource_exists "retentionpolicies" "${BACKUP_RETENTION_REF}"; then
+    warn "RetentionPolicy/${BACKUP_RETENTION_REF} was not found; skipping retention reference"
+    BACKUP_RETENTION_REF=""
+  fi
+
+  if [[ -n "${BACKUP_NOTIFICATION_REF}" ]] && ! data_protection_resource_exists "notificationendpoints" "${BACKUP_NOTIFICATION_REF}"; then
+    warn "NotificationEndpoint/${BACKUP_NOTIFICATION_REF} was not found; skipping notification reference"
+    BACKUP_NOTIFICATION_REF=""
+  fi
+
+  return 0
+}
+
+
+sync_data_protection_auth_secret() {
+  local mysql_password
+  if ! mysql_password="$(resolve_mysql_backup_password 2>/dev/null)"; then
+    warn "Unable to resolve the MySQL root password; skipping data protection registration"
+    return 1
+  fi
+
+  if [[ -z "${mysql_password}" ]]; then
+    warn "Unable to resolve the MySQL root password; skipping data protection registration"
+    return 1
+  fi
+
+  kubectl create secret generic "${BACKUP_AUTH_SECRET}" \
+    -n "${BACKUP_NAMESPACE}" \
+    --from-literal="password=${mysql_password}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
+
+install_data_protection_integration() {
+  prepare_data_protection_integration || return 0
+  sync_data_protection_auth_secret || return 0
+
+  section "Register MySQL Data Protection"
+  apply_data_protection_manifests
+  DATA_PROTECTION_APPLIED="true"
+  success "MySQL data protection registration completed"
+}
+
+
+uninstall_data_protection_integration() {
+  cluster_supports_data_protection || return 0
+
+  kubectl delete backuppolicies.dataprotection.archinfra.io -n "${BACKUP_NAMESPACE}" --ignore-not-found "${BACKUP_POLICY_NAME}" >/dev/null 2>&1 || true
+  kubectl delete backupsources.dataprotection.archinfra.io -n "${BACKUP_NAMESPACE}" --ignore-not-found "${BACKUP_SOURCE_NAME}" >/dev/null 2>&1 || true
+  kubectl delete secret -n "${BACKUP_NAMESPACE}" --ignore-not-found "${BACKUP_AUTH_SECRET}" >/dev/null 2>&1 || true
+}
+
+
 uninstall_addons() {
   require_namespace_exists
 
@@ -2021,67 +2317,67 @@ uninstall_addons() {
   fi
 
   if addon_selected monitoring; then
-    section "移除 monitoring addon"
+    section "Remove Monitoring Addon"
     delete_external_monitoring_resources
-    success "monitoring addon 已移除"
+    success "Monitoring addon removed"
   fi
 }
 
 
 show_addon_status() {
-  local external_monitoring="未安装"
-  local embedded_monitoring="未安装"
-  local embedded_logging="未安装"
-  local addon_service_monitor="未安装"
-  local embedded_service_monitor="未安装"
-  local addon_prometheus_rule="未安装"
-  local embedded_prometheus_rule="未安装"
+  local external_monitoring="not-installed"
+  local embedded_monitoring="not-installed"
+  local embedded_logging="not-installed"
+  local addon_service_monitor="not-installed"
+  local embedded_service_monitor="not-installed"
+  local addon_prometheus_rule="not-installed"
+  local embedded_prometheus_rule="not-installed"
 
   require_namespace_exists
 
-  resource_exists deployment "${ADDON_EXPORTER_DEPLOYMENT_NAME}" && external_monitoring="已安装"
+  resource_exists deployment "${ADDON_EXPORTER_DEPLOYMENT_NAME}" && external_monitoring="installed"
 
   if resource_exists statefulset "${STS_NAME}"; then
-    statefulset_has_container "mysqld-exporter" && embedded_monitoring="已安装"
-    statefulset_has_container "fluent-bit" && embedded_logging="已安装"
+    statefulset_has_container "mysqld-exporter" && embedded_monitoring="installed"
+    statefulset_has_container "fluent-bit" && embedded_logging="installed"
   fi
 
   if cluster_supports_service_monitor; then
-    resource_exists servicemonitor "${ADDON_SERVICE_MONITOR_NAME}" && addon_service_monitor="已安装"
-    resource_exists servicemonitor "${SERVICE_MONITOR_NAME}" && embedded_service_monitor="已安装"
+    resource_exists servicemonitor "${ADDON_SERVICE_MONITOR_NAME}" && addon_service_monitor="installed"
+    resource_exists servicemonitor "${SERVICE_MONITOR_NAME}" && embedded_service_monitor="installed"
   else
-    addon_service_monitor="集群未安装 CRD"
-    embedded_service_monitor="集群未安装 CRD"
+    addon_service_monitor="crd-missing"
+    embedded_service_monitor="crd-missing"
   fi
 
   if cluster_supports_prometheus_rule; then
-    resource_exists prometheusrule "${ADDON_PROMETHEUS_RULE_NAME}" && addon_prometheus_rule="已安装"
-    resource_exists prometheusrule "${PROMETHEUS_RULE_NAME}" && embedded_prometheus_rule="已安装"
+    resource_exists prometheusrule "${ADDON_PROMETHEUS_RULE_NAME}" && addon_prometheus_rule="installed"
+    resource_exists prometheusrule "${PROMETHEUS_RULE_NAME}" && embedded_prometheus_rule="installed"
   else
-    addon_prometheus_rule="集群未安装 CRD"
-    embedded_prometheus_rule="集群未安装 CRD"
+    addon_prometheus_rule="crd-missing"
+    embedded_prometheus_rule="crd-missing"
   fi
 
-  section "Addon 状态"
-  echo "外置 monitoring addon   : ${external_monitoring}"
-  echo "内嵌 monitoring sidecar : ${embedded_monitoring}"
-  echo "外置 ServiceMonitor     : ${addon_service_monitor}"
-  echo "内嵌 ServiceMonitor     : ${embedded_service_monitor}"
-  echo "外置 PrometheusRule     : ${addon_prometheus_rule}"
-  echo "内嵌 PrometheusRule     : ${embedded_prometheus_rule}"
-  echo "Fluent Bit sidecar      : ${embedded_logging}"
+  section "Addon Status"
+  echo "External monitoring addon : ${external_monitoring}"
+  echo "Embedded monitoring       : ${embedded_monitoring}"
+  echo "External ServiceMonitor   : ${addon_service_monitor}"
+  echo "Embedded ServiceMonitor   : ${embedded_service_monitor}"
+  echo "External PrometheusRule   : ${addon_prometheus_rule}"
+  echo "Embedded PrometheusRule   : ${embedded_prometheus_rule}"
+  echo "Fluent Bit sidecar        : ${embedded_logging}"
   echo
-  echo "推荐结论:"
-  echo "1. 已有 MySQL 若补监控，优先使用 addon-install，新资源以 Deployment 形式补齐。"
-  echo "2. 备份恢复已迁移到独立数据保护系统，不再通过 apps_mysql addon 管理。"
-  echo "3. 日志推荐接入平台级 DaemonSet 日志体系，只有在必须采集 Pod 内慢日志文件时才开启 sidecar。"
+  echo "Recommended:"
+  echo "1. If MySQL already exists, prefer addon-install for extra monitoring."
+  echo "2. Backup and restore execution still belongs to dataprotection controllers."
+  echo "3. If you need the log sidecar, use install and plan for a rolling update."
 }
 
 
 show_status() {
   require_namespace_exists
 
-  section "运行状态"
+  section "Runtime Status"
   kubectl get statefulset -n "${NAMESPACE}" || true
   echo
   kubectl get deployment -n "${NAMESPACE}" || true
@@ -2100,6 +2396,11 @@ show_status() {
     kubectl get prometheusrule -n "${NAMESPACE}" || true
     echo
   fi
+  if cluster_supports_data_protection && kubectl get namespace "${BACKUP_NAMESPACE}" >/dev/null 2>&1; then
+    kubectl get backupsources.dataprotection.archinfra.io -n "${BACKUP_NAMESPACE}" --ignore-not-found "${BACKUP_SOURCE_NAME}" || true
+    kubectl get backuppolicies.dataprotection.archinfra.io -n "${BACKUP_NAMESPACE}" --ignore-not-found "${BACKUP_POLICY_NAME}" || true
+    echo
+  fi
   kubectl get jobs -n "${NAMESPACE}" || true
 }
 
@@ -2107,7 +2408,7 @@ show_status() {
 delete_pvcs_if_requested() {
   [[ "${DELETE_PVC}" == "true" ]] || return 0
 
-  log "删除 StatefulSet/${STS_NAME} 关联 PVC"
+  log "Delete StatefulSet/${STS_NAME} PVCs"
   mapfile -t pvcs < <(kubectl get pvc -n "${NAMESPACE}" -o name | grep "^persistentvolumeclaim/data-${STS_NAME}-" || true)
   if [[ ${#pvcs[@]} -eq 0 ]]; then
     return 0
@@ -2118,7 +2419,7 @@ delete_pvcs_if_requested() {
 
 uninstall_app() {
   extract_payload
-  section "卸载 MySQL"
+  section "Uninstall MySQL"
 
   if ! cluster_supports_service_monitor; then
     SERVICE_MONITOR_ENABLED="false"
@@ -2130,6 +2431,7 @@ uninstall_app() {
   render_manifest "${MYSQL_MANIFEST}" | kubectl delete -n "${NAMESPACE}" --ignore-not-found -f - >/dev/null || true
   delete_external_monitoring_resources
   delete_legacy_backup_resources
+  uninstall_data_protection_integration
   kubectl delete jobs -n "${NAMESPACE}" --ignore-not-found "mysql-benchmark" >/dev/null 2>&1 || true
   kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${METRICS_SERVICE_NAME}" >/dev/null 2>&1 || true
   kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${FLUENTBIT_CONFIGMAP}" >/dev/null 2>&1 || true
@@ -2143,7 +2445,7 @@ uninstall_app() {
   fi
   delete_pvcs_if_requested
 
-  success "MySQL 卸载完成"
+  success "MySQL uninstall completed"
 }
 
 
@@ -2153,21 +2455,22 @@ install_app() {
   ensure_namespace
 
   if [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && ! cluster_supports_service_monitor; then
-    warn "集群中未安装 ServiceMonitor CRD，本次跳过 ServiceMonitor 资源"
+    warn "ServiceMonitor CRD is missing; skipping ServiceMonitor resources"
     SERVICE_MONITOR_ENABLED="false"
   fi
 
   if [[ "${PROMETHEUS_RULE_ENABLED}" == "true" ]] && ! cluster_supports_prometheus_rule; then
-    warn "集群中未安装 PrometheusRule CRD，本次跳过 PrometheusRule 资源"
+    warn "PrometheusRule CRD is missing; skipping PrometheusRule resources"
     PROMETHEUS_RULE_ENABLED="false"
   fi
 
-  section "安装 / 对齐 MySQL"
+  section "Install Or Reconcile MySQL"
   apply_mysql_manifests
   cleanup_disabled_optional_resources
   wait_for_statefulset_ready
   wait_for_mysql_ready
-  success "MySQL 安装/对齐完成"
+  install_data_protection_integration
+  success "MySQL install/reconcile completed"
 }
 
 
@@ -2178,11 +2481,11 @@ install_addons() {
 
   if addon_selected monitoring; then
     if resource_exists statefulset "${STS_NAME}" && statefulset_has_container "mysqld-exporter"; then
-      die "当前 MySQL 已启用内嵌 exporter sidecar，不建议再叠加外置 monitoring addon"
+      die "The current MySQL already embeds mysqld-exporter; do not stack the external monitoring addon"
     fi
 
     if addon_selected service-monitor && ! cluster_supports_service_monitor; then
-      warn "集群中未安装 ServiceMonitor CRD，本次仅安装 monitoring addon，跳过 service-monitor"
+      warn "ServiceMonitor CRD is missing; installing monitoring addon without service-monitor"
       ADDONS="${ADDONS//service-monitor/}"
       ADDONS="${ADDONS//,,/,}"
       ADDONS="${ADDONS#,}"
@@ -2191,24 +2494,24 @@ install_addons() {
     fi
 
     if ! cluster_supports_prometheus_rule; then
-      warn "集群中未安装 PrometheusRule CRD，本次 monitoring addon 跳过告警规则"
+      warn "PrometheusRule CRD is missing; skipping monitoring addon alert rules"
       PROMETHEUS_RULE_ENABLED="false"
     fi
 
     if ! resource_exists statefulset "${STS_NAME}" && [[ "${ADDON_MONITORING_TARGET_EXPLICIT}" != "true" && "${MYSQL_HOST_EXPLICIT}" != "true" ]]; then
-      die "为已有外部 MySQL 安装 monitoring addon 时，请显式提供 --monitoring-target，或至少提供 --mysql-host/--mysql-port"
+      die "When installing the monitoring addon for an existing external MySQL, pass --monitoring-target or at least --mysql-host/--mysql-port"
     fi
 
     if monitoring_bootstrap_auth_available; then
       ensure_addon_exporter_user
     else
-      warn "未提供可写 MySQL 管理凭据，跳过 exporter 用户自动创建；请确保目标实例已存在 ${ADDON_EXPORTER_USERNAME} 账号"
+      warn "Writable MySQL admin credentials were not provided; skipping exporter user bootstrap"
     fi
 
-    section "安装 monitoring addon"
+    section "Install Monitoring Addon"
     apply_monitoring_addon_manifests
     kubectl rollout status "deployment/${ADDON_EXPORTER_DEPLOYMENT_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
-    success "monitoring addon 安装完成"
+    success "Monitoring addon install completed"
   fi
 }
 
@@ -2297,6 +2600,8 @@ kubectl get pods -n ${NAMESPACE}
 kubectl get svc -n ${NAMESPACE}
 kubectl get pvc -n ${NAMESPACE}
 $( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backupsources.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_SOURCE_NAME}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backuppolicies.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_POLICY_NAME}" )
 kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c mysql --tail=200
 $( [[ "${FLUENTBIT_ENABLED}" == "true" ]] && echo "kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c fluent-bit --tail=200" )
 
@@ -2310,7 +2615,8 @@ NodePort 访问地址:
 1. uninstall 时不要加 --delete-pvc
 2. namespace 与 --sts-name 保持不变
 3. 再次执行 install 即可按当前开关重新对齐
-4. 备份恢复已迁移到独立数据保护系统，请勿再从 apps_mysql 安装器里寻找相关入口
+4. MySQL 备份恢复通过 dataprotection 管理，不再单独交付 addon runner 镜像
+$( if [[ "${DATA_PROTECTION_APPLIED}" == "true" ]]; then echo "5. 已在 ${BACKUP_NAMESPACE} 注册 BackupSource/${BACKUP_SOURCE_NAME} 与 BackupPolicy/${BACKUP_POLICY_NAME}"; elif [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then echo "5. 本次未完成数据保护注册，请确认 dataprotection CRD 与 BackupStorage/${BACKUP_PRIMARY_STORAGE_NAME} 是否已就绪"; fi )
 EOF
     return 0
   fi
@@ -2320,6 +2626,8 @@ kubectl get pods -n ${NAMESPACE}
 kubectl get svc -n ${NAMESPACE}
 kubectl get pvc -n ${NAMESPACE}
 $( [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && echo "kubectl get servicemonitor -n ${NAMESPACE}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backupsources.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_SOURCE_NAME}" )
+$( [[ "${DATA_PROTECTION_APPLIED}" == "true" ]] && echo "kubectl get backuppolicies.dataprotection.archinfra.io -n ${BACKUP_NAMESPACE} ${BACKUP_POLICY_NAME}" )
 kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c mysql --tail=200
 $( [[ "${FLUENTBIT_ENABLED}" == "true" ]] && echo "kubectl logs -n ${NAMESPACE} ${STS_NAME}-0 -c fluent-bit --tail=200" )
 
@@ -2333,7 +2641,8 @@ NodePort 访问:
 1. uninstall 时不要加 --delete-pvc
 2. namespace 与 --sts-name 保持不变
 3. 再次执行 install 即可按当前开关重新对齐
-4. 备份恢复已迁移到独立数据保护系统，请勿再从 apps_mysql 安装器里寻找相关入口
+4. MySQL 备份恢复通过 dataprotection 管理，不再单独交付 addon runner 镜像
+$( if [[ "${DATA_PROTECTION_APPLIED}" == "true" ]]; then echo "5. 已在 ${BACKUP_NAMESPACE} 注册 BackupSource/${BACKUP_SOURCE_NAME} 与 BackupPolicy/${BACKUP_POLICY_NAME}"; elif [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then echo "5. 本次未完成数据保护注册，请确认 dataprotection CRD 与 BackupStorage/${BACKUP_PRIMARY_STORAGE_NAME} 是否已就绪"; fi )
 EOF
 }
 

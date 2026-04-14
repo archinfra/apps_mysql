@@ -9,6 +9,7 @@ IMAGES_DIR="${ROOT_DIR}/images"
 MANIFESTS_DIR="${ROOT_DIR}/manifests"
 DIST_DIR="${ROOT_DIR}/dist"
 IMAGE_JSON="${IMAGES_DIR}/image.json"
+VERSION_FILE="${ROOT_DIR}/VERSION"
 ASSEMBLER="${ROOT_DIR}/scripts/assemble-install.sh"
 INSTALL_MODULE_ROOT="${ROOT_DIR}/scripts/install/modules"
 SELECTED_IMAGE_ITEMS_FILE="${TEMP_DIR}/selected-images.jsonl"
@@ -19,6 +20,8 @@ PLATFORM="linux/amd64"
 BUILD_ALL_ARCH="false"
 PROFILE="integrated"
 BUILD_ALL_PROFILES="false"
+PACKAGE_VERSION=""
+VERSION_TAG=""
 INSTALLER_NAME=""
 
 RED='\033[0;31m'
@@ -48,13 +51,38 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  ./build.sh [--arch amd64|arm64|all] [--profile integrated|benchmark|monitoring|all]
+  ./build.sh [--arch amd64|arm64|all] [--profile integrated|benchmark|monitoring|all] [--version 1.5.13|v1.5.13]
 
 Examples:
   ./build.sh --arch amd64 --profile integrated
+  ./build.sh --arch amd64 --profile integrated --version v1.5.13
   ./build.sh --arch arm64 --profile benchmark
   ./build.sh --arch all --profile all
 EOF
+}
+
+normalize_version() {
+  local value="${1:-}"
+  value="${value#refs/tags/}"
+  value="${value#v}"
+  value="$(printf '%s' "${value}" | tr -d '\r\n')"
+  [[ -n "${value}" ]] || die "Version cannot be empty"
+  [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z._+-]+)*$ ]] || die "Unsupported version format: ${1}"
+  PACKAGE_VERSION="${value}"
+  VERSION_TAG="v${PACKAGE_VERSION}"
+}
+
+resolve_package_version() {
+  if [[ -n "${PACKAGE_VERSION}" ]]; then
+    return 0
+  fi
+
+  [[ -f "${VERSION_FILE}" ]] || die "VERSION is missing"
+  normalize_version "$(tr -d '\r\n' < "${VERSION_FILE}")"
+}
+
+escape_sed_replacement() {
+  printf '%s' "$1" | sed 's/[\\/&]/\\&/g'
 }
 
 normalize_arch() {
@@ -108,7 +136,7 @@ profile_installer_basename() {
 }
 
 refresh_installer_name() {
-  INSTALLER_NAME="$(profile_installer_basename)-${ARCH}.run"
+  INSTALLER_NAME="$(profile_installer_basename)-${VERSION_TAG}-${ARCH}.run"
 }
 
 parse_args() {
@@ -122,6 +150,11 @@ parse_args() {
       --profile|-p)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         normalize_profile "$2"
+        shift 2
+        ;;
+      --version)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        normalize_version "$2"
         shift 2
         ;;
       -h|--help)
@@ -138,6 +171,7 @@ parse_args() {
 check_requirements() {
   command -v jq >/dev/null 2>&1 || die "jq is required"
   command -v docker >/dev/null 2>&1 || die "docker is required"
+  [[ -f "${VERSION_FILE}" ]] || die "VERSION is missing"
   [[ -f "${ASSEMBLER}" ]] || die "scripts/assemble-install.sh is missing"
   [[ -d "${INSTALL_MODULE_ROOT}" ]] || die "scripts/install/modules is missing"
   find "${INSTALL_MODULE_ROOT}" -maxdepth 1 -type f -name '*.sh' | grep -q . || die "scripts/install/modules is empty"
@@ -271,7 +305,13 @@ package_payload() {
 
 prepare_profile_script() {
   local profile_script="${TEMP_DIR}/install-${PROFILE}.sh"
-  sed "0,/^PACKAGE_PROFILE=.*$/s//PACKAGE_PROFILE=\"${PROFILE}\"/" "${ROOT_DIR}/install.sh" > "${profile_script}"
+  local escaped_profile escaped_version
+  escaped_profile="$(escape_sed_replacement "${PROFILE}")"
+  escaped_version="$(escape_sed_replacement "${PACKAGE_VERSION}")"
+  sed \
+    -e "0,/^APP_VERSION=.*$/s//APP_VERSION=\"${escaped_version}\"/" \
+    -e "0,/^PACKAGE_PROFILE=.*$/s//PACKAGE_PROFILE=\"${escaped_profile}\"/" \
+    "${ROOT_DIR}/install.sh" > "${profile_script}"
   echo "${profile_script}"
 }
 
@@ -299,6 +339,7 @@ build_one() {
   echo "  arch: ${ARCH}"
   echo "  platform: ${PLATFORM}"
   echo "  profile: ${PROFILE}"
+  echo "  version: ${VERSION_TAG}"
 
   prepare_directories
   prepare_images
@@ -331,6 +372,7 @@ main() {
   normalize_arch "${ARCH}"
   normalize_profile "${PROFILE}"
   parse_args "$@"
+  resolve_package_version
   assemble_installer
   check_requirements
   build_matrix

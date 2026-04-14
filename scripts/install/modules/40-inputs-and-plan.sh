@@ -125,13 +125,14 @@ validate_environment() {
 validate_inputs() {
   apply_resource_profile
 
-  [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 仅支持 true 或 false"
+  [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 只支持 true 或 false"
+  [[ "${DATA_PROTECTION_ENABLED}" =~ ^(true|false)$ ]] || die "--enable-data-protection / --disable-data-protection only accepts boolean switches"
 
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
     if [[ "${NODEPORT_ENABLED}" == "true" ]]; then
       [[ "${NODE_PORT}" =~ ^[0-9]+$ ]] || die "nodePort 必须是数字"
-      (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须在 30000-32767 之间"
+      (( NODE_PORT >= 30000 && NODE_PORT <= 32767 )) || die "nodePort 必须位于 30000-32767 之间"
     fi
   fi
 
@@ -144,6 +145,17 @@ validate_inputs() {
   [[ "${BENCHMARK_TABLE_SIZE}" =~ ^[0-9]+$ ]] || die "压测单表数据量必须是数字"
   [[ "${MYSQL_SLOW_QUERY_TIME}" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "慢查询阈值必须是数字"
   [[ "${BENCHMARK_PROFILE}" =~ ^(standard|oltp-point-select|oltp-read-only|oltp-read-write)$ ]] || die "benchmark-profile 仅支持 standard、oltp-point-select、oltp-read-only、oltp-read-write"
+
+  if [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then
+    [[ -n "${BACKUP_NAMESPACE}" ]] || die "--backup-namespace cannot be empty"
+    [[ -n "${BACKUP_ADDON_NAME}" ]] || die "--backup-addon-name cannot be empty"
+    [[ -n "${BACKUP_SOURCE_NAME}" ]] || die "--backup-source-name cannot be empty"
+    [[ -n "${BACKUP_POLICY_NAME}" ]] || die "--backup-policy-name cannot be empty"
+    [[ -n "${BACKUP_AUTH_SECRET}" ]] || die "--backup-auth-secret cannot be empty"
+    [[ -n "${BACKUP_PRIMARY_STORAGE_NAME}" ]] || die "--backup-storage-name cannot be empty"
+    [[ -n "${BACKUP_RETENTION_REF}" ]] || die "--backup-retention-ref cannot be empty"
+    [[ -n "${BACKUP_SCHEDULE}" ]] || die "--backup-schedule cannot be empty"
+  fi
 
   validate_action_feature_gates
 }
@@ -182,6 +194,24 @@ print_plan() {
       echo "监控 exporter           : ${MONITORING_ENABLED}"
       echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
       echo "Fluent Bit sidecar      : ${FLUENTBIT_ENABLED}"
+      echo "Data protection         : ${DATA_PROTECTION_ENABLED}"
+      if [[ "${DATA_PROTECTION_ENABLED}" == "true" ]]; then
+        echo "Backup namespace        : ${BACKUP_NAMESPACE}"
+        echo "Backup source           : ${BACKUP_SOURCE_NAME}"
+        echo "Backup policy           : ${BACKUP_POLICY_NAME}"
+        echo "Primary backup storage  : ${BACKUP_PRIMARY_STORAGE_NAME}"
+        if [[ -n "${BACKUP_SECONDARY_STORAGE_NAME}" ]]; then
+          echo "Secondary backup store  : ${BACKUP_SECONDARY_STORAGE_NAME}"
+        fi
+        echo "Backup retention        : ${BACKUP_RETENTION_REF}"
+        echo "Backup schedule         : ${BACKUP_SCHEDULE}"
+        if [[ -n "${BACKUP_NOTIFICATION_REF}" ]]; then
+          echo "Backup notification     : ${BACKUP_NOTIFICATION_REF}"
+        fi
+        if [[ -n "${BACKUP_DATABASE}" ]]; then
+          echo "Backup database         : ${BACKUP_DATABASE}"
+        fi
+      fi
       echo "慢日志阈值(秒)           : ${MYSQL_SLOW_QUERY_TIME}"
       echo "业务影响                : install 会整体对齐 StatefulSet，配置变化时可能触发滚动更新"
       ;;
