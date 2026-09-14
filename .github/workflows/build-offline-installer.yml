@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional release version override, such as 1.5.13 or v1.5.13
+        description: Optional release version override, such as 1.6.0 or v1.6.0
         required: false
         type: string
   push:
@@ -20,6 +20,7 @@ on:
       - "VERSION"
       - "scripts/**"
       - "README.md"
+      - "docs/**"
       - "images/**"
       - "manifests/**"
   pull_request:
@@ -30,6 +31,7 @@ on:
       - "VERSION"
       - "scripts/**"
       - "README.md"
+      - "docs/**"
       - "images/**"
       - "manifests/**"
 
@@ -46,6 +48,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate installer and monitoring assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/assemble-install.sh /tmp/mysql-install.sh
+          bash -n /tmp/mysql-install.sh
+          python3 -m json.tool images/image.json >/dev/null
+          python3 scripts/validate-monitoring-assets.py
+          grep -q 'mysql:8.0.46' scripts/install/modules/00-header.sh
+          grep -q 'mysqld-exporter:v0.19.0' scripts/install/modules/00-header.sh
 
       - name: Resolve version
         id: resolve
@@ -133,6 +146,16 @@ jobs:
       - name: Build installer
         run: |
           ./build.sh --arch "${{ matrix.arch }}" --profile "${{ matrix.profile }}" --version "${{ needs.meta.outputs.version_tag }}"
+
+      - name: Verify checksum
+        run: |
+          case "${{ matrix.profile }}" in
+            integrated) basename=mysql-installer ;;
+            benchmark) basename=mysql-benchmark ;;
+            monitoring) basename=mysql-monitoring ;;
+          esac
+          cd dist
+          sha256sum -c "${basename}-${{ needs.meta.outputs.version_tag }}-${{ matrix.arch }}.run.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
