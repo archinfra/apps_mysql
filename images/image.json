@@ -2,8 +2,8 @@
   {
     "arch": "amd64",
     "platform": "linux/amd64",
-    "pull": "docker.io/library/mysql:8.0.46",
-    "tag": "sealos.hub:5000/kube4/mysql:8.0.46",
+    "pull": "docker.io/library/mysql:8.4.11",
+    "tag": "sealos.hub:5000/kube4/mysql:8.4.11",
     "tar": "mysql-amd64.tar"
   },
   {
@@ -37,8 +37,8 @@
   {
     "arch": "arm64",
     "platform": "linux/arm64",
-    "pull": "docker.io/library/mysql:8.0.46",
-    "tag": "sealos.hub:5000/kube4/mysql:8.0.46",
+    "pull": "docker.io/library/mysql:8.4.11",
+    "tag": "sealos.hub:5000/kube4/mysql:8.4.11",
     "tar": "mysql-arm64.tar"
   },
   {
