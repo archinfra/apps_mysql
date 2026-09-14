@@ -11,6 +11,10 @@ validate_single_instance_mode() {
       MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.4.11"
       ;;
   esac
+
+  if [[ -z "${ADDON_EXPORTER_PASSWORD}" ]]; then
+    ADDON_EXPORTER_PASSWORD="$(generate_mysql_password)"
+  fi
 }
 
 
