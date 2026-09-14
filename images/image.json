@@ -16,7 +16,7 @@
   {
     "arch": "amd64",
     "platform": "linux/amd64",
-    "pull": "quay.io/prometheus/mysqld-exporter:v0.19.0",
+    "pull": "docker.io/prom/mysqld-exporter:v0.19.0",
     "tag": "sealos.hub:5000/kube4/mysqld-exporter:v0.19.0",
     "tar": "mysqld-exporter-amd64.tar"
   },
@@ -51,7 +51,7 @@
   {
     "arch": "arm64",
     "platform": "linux/arm64",
-    "pull": "quay.io/prometheus/mysqld-exporter:v0.19.0",
+    "pull": "docker.io/prom/mysqld-exporter:v0.19.0",
     "tag": "sealos.hub:5000/kube4/mysqld-exporter:v0.19.0",
     "tar": "mysqld-exporter-arm64.tar"
   },
