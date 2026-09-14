@@ -95,8 +95,8 @@ parse_args() {
       --registry)
         REGISTRY_REPO="$2"
         REGISTRY_ADDR="${2%%/*}"
-        MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.0.45"
-        MYSQL_EXPORTER_IMAGE="${REGISTRY_REPO}/mysqld-exporter:v0.15.1"
+        MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.0.46"
+        MYSQL_EXPORTER_IMAGE="${REGISTRY_REPO}/mysqld-exporter:v0.19.0"
         FLUENTBIT_IMAGE="${REGISTRY_REPO}/fluent-bit:3.0.7"
         BUSYBOX_IMAGE="${REGISTRY_REPO}/busybox:v1"
         SYSBENCH_IMAGE="${REGISTRY_REPO}/sysbench:1.0.20-oe2403sp1"
