@@ -135,6 +135,7 @@ main() {
   prompt_missing_values
   validate_environment
   validate_inputs
+  validate_single_instance_mode
   prepare_runtime_auth_secret
 
   if [[ "${ACTION}" != "status" && "${ACTION}" != "addon-status" ]]; then
