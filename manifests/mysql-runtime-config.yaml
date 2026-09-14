@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __PROBE_CONFIGMAP__
+data:
+  livenessprobe.sh: |
+    #!/bin/sh
+    exec mysqladmin --protocol=TCP -h 127.0.0.1 ping --silent
+  readinessprobe.sh: |
+    #!/bin/sh
+    exec mysqladmin --protocol=TCP -h 127.0.0.1 ping --silent
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __INIT_CONFIGMAP__
+data:
+  init-users.sql: |
+    SET sql_log_bin=0;
+    CREATE USER IF NOT EXISTS '__ADDON_EXPORTER_USERNAME__'@'%' IDENTIFIED BY '__ADDON_EXPORTER_PASSWORD__' WITH MAX_USER_CONNECTIONS 3;
+    ALTER USER '__ADDON_EXPORTER_USERNAME__'@'%' IDENTIFIED BY '__ADDON_EXPORTER_PASSWORD__' WITH MAX_USER_CONNECTIONS 3;
+    GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO '__ADDON_EXPORTER_USERNAME__'@'%';
+    FLUSH PRIVILEGES;
+    SET sql_log_bin=1;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __MYSQL_CONFIGMAP__
+data:
+  my.cnf: |
+    [mysqld]
+    # Network and protocol surface.
+    bind-address=0.0.0.0
+    mysqlx=0
+    skip_name_resolve=ON
+    local_infile=OFF
+    max_allowed_packet=64M
+    max_connections=300
+    back_log=128
+    thread_cache_size=64
+
+    # Durability first. These defaults are suitable for a single-instance production baseline.
+    default_storage_engine=InnoDB
+    innodb_flush_log_at_trx_commit=1
+    sync_binlog=1
+    innodb_buffer_pool_size=512M
+    innodb_log_buffer_size=64M
+    innodb_redo_log_capacity=1G
+    innodb_file_per_table=ON
+
+    # Reduce avoidable disk spills while keeping per-connection memory bounded.
+    tmp_table_size=32M
+    max_heap_table_size=32M
+    table_open_cache=2000
+    table_definition_cache=1400
+
+    # Observability and troubleshooting.
+    performance_schema=ON
+    log_error_verbosity=2
+    log_error=/var/log/mysql/error.log
+    slow_query_log=ON
+    slow_query_log_file=/var/log/mysql/slow.log
+    long_query_time=__MYSQL_SLOW_QUERY_TIME__
+    log_queries_not_using_indexes=OFF
+
+    # Keep binlog for backup/PITR integration and operational visibility.
+    log_bin=mycluster
+    binlog_format=ROW
+    binlog_expire_logs_seconds=604800
+    enforce_gtid_consistency=ON
+    gtid_mode=ON
+
+    socket=/var/run/mysqld/mysqld.sock
+    datadir=/var/lib/mysql
+    !includedir /etc/mysql/conf.d
+
+    [client]
+    default-character-set=utf8mb4
+    socket=/var/run/mysqld/mysqld.sock
+
+    [mysql]
+    default-character-set=utf8mb4
+    socket=/var/run/mysqld/mysqld.sock
+
+    [mysqladmin]
+    socket=/var/run/mysqld/mysqld.sock
