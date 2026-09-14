@@ -2,6 +2,13 @@
 # This override keeps existing PVC upgrades safe when embedded mysqld-exporter
 # switches from root credentials to the dedicated least-privilege account.
 
+validate_single_instance_mode() {
+  if [[ "${ACTION}" == "install" && "${MYSQL_REPLICAS}" != "1" ]]; then
+    die "apps_mysql v1.6.0 当前只支持单实例交付；--mysql-replicas 必须为 1。多副本 StatefulSet 不等于 MySQL HA。"
+  fi
+}
+
+
 ensure_embedded_exporter_user() {
   [[ "${MONITORING_ENABLED}" == "true" ]] || return 0
 
