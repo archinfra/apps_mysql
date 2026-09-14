@@ -38,6 +38,9 @@ spec:
           args:
             - "--config.my-cnf=/etc/mysql-exporter/.my.cnf"
             - "--mysqld.address=__ADDON_MONITORING_TARGET__"
+            - "--collect.info_schema.innodb_metrics"
+            - "--collect.info_schema.processlist"
+            - "--collect.binlog_size"
           ports:
             - name: metrics
               containerPort: __METRICS_PORT__
@@ -109,17 +112,31 @@ metadata:
     monitoring.archinfra.io/stack: default
 spec:
   groups:
-    - name: __APP_NAME__-addon
+    - name: __APP_NAME__-addon-availability
       rules:
         - alert: MySQLAddonExporterDown
-          expr: min(mysql_up{namespace="__NAMESPACE__"}) < 1
+          expr: |
+            max(up{namespace="__NAMESPACE__",service="__ADDON_EXPORTER_SERVICE_NAME__"}) == 0
+            or absent(up{namespace="__NAMESPACE__",service="__ADDON_EXPORTER_SERVICE_NAME__"})
           for: 2m
           labels:
             severity: critical
             category: availability
           annotations:
-            summary: MySQL addon exporter is down
-            description: External MySQL monitoring addon exporter for __APP_NAME__ is down.
+            summary: MySQL addon exporter is unavailable
+            description: External mysqld-exporter for __APP_NAME__ has not been scraped successfully for 2 minutes.
+        - alert: MySQLAddonTargetDown
+          expr: max(mysql_up{namespace="__NAMESPACE__"}) == 0
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: Monitored MySQL target is unavailable
+            description: mysqld-exporter cannot connect to the monitored MySQL target for 2 minutes.
+
+    - name: __APP_NAME__-addon-performance
+      rules:
         - alert: MySQLAddonConnectionsHigh
           expr: |
             max(mysql_global_status_threads_connected{namespace="__NAMESPACE__"})
@@ -132,7 +149,87 @@ spec:
             category: saturation
           annotations:
             summary: External MySQL connection usage is high
-            description: The monitored MySQL target for addon __APP_NAME__ is using more than 80% of max_connections.
+            description: The monitored MySQL target is using more than 80% of max_connections for 10 minutes.
+        - alert: MySQLAddonConnectionsCritical
+          expr: |
+            max(mysql_global_status_threads_connected{namespace="__NAMESPACE__"})
+            /
+            clamp_min(max(mysql_global_variables_max_connections{namespace="__NAMESPACE__"}), 1)
+            * 100 > 90
+          for: 5m
+          labels:
+            severity: critical
+            category: saturation
+          annotations:
+            summary: External MySQL connection usage is critical
+            description: The monitored MySQL target is using more than 90% of max_connections for 5 minutes.
+        - alert: MySQLAddonAbortedConnectionsHigh
+          expr: |
+            increase(mysql_global_status_aborted_connects{namespace="__NAMESPACE__"}[10m])
+            /
+            clamp_min(increase(mysql_global_status_connections{namespace="__NAMESPACE__"}[10m]), 1)
+            * 100 > 5
+          for: 10m
+          labels:
+            severity: warning
+            category: connections
+          annotations:
+            summary: External MySQL aborted connection ratio is high
+            description: More than 5% of connection attempts have been aborted over 10 minutes.
+        - alert: MySQLAddonSlowQueryRatioHigh
+          expr: |
+            increase(mysql_global_status_slow_queries{namespace="__NAMESPACE__"}[10m])
+            /
+            clamp_min(increase(mysql_global_status_questions{namespace="__NAMESPACE__"}[10m]), 1)
+            * 100 > 1
+          for: 10m
+          labels:
+            severity: warning
+            category: performance
+          annotations:
+            summary: External MySQL slow query ratio is high
+            description: Slow queries exceed 1% of questions for 10 minutes.
+        - alert: MySQLAddonThreadsRunningHigh
+          expr: max(mysql_global_status_threads_running{namespace="__NAMESPACE__"}) > 16
+          for: 10m
+          labels:
+            severity: warning
+            category: saturation
+          annotations:
+            summary: External MySQL has many running threads
+            description: More than 16 threads have been running concurrently for 10 minutes.
+        - alert: MySQLAddonDeadlocksDetected
+          expr: increase(mysql_global_status_innodb_deadlocks{namespace="__NAMESPACE__"}[10m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+            category: contention
+          annotations:
+            summary: External MySQL deadlock detected
+            description: One or more InnoDB deadlocks were reported in the last 10 minutes.
+        - alert: MySQLAddonRowLockWaitHigh
+          expr: max(mysql_global_status_innodb_row_lock_current_waits{namespace="__NAMESPACE__"}) > 5
+          for: 5m
+          labels:
+            severity: warning
+            category: contention
+          annotations:
+            summary: External MySQL row lock waits are high
+            description: More than 5 current InnoDB row lock waits have persisted for 5 minutes.
+        - alert: MySQLAddonTmpDiskTablesHigh
+          expr: |
+            increase(mysql_global_status_created_tmp_disk_tables{namespace="__NAMESPACE__"}[15m])
+            /
+            clamp_min(increase(mysql_global_status_created_tmp_tables{namespace="__NAMESPACE__"}[15m]), 1)
+            * 100 > 25
+            and increase(mysql_global_status_created_tmp_tables{namespace="__NAMESPACE__"}[15m]) > 100
+          for: 15m
+          labels:
+            severity: warning
+            category: performance
+          annotations:
+            summary: External MySQL temporary tables are spilling to disk
+            description: More than 25% of temporary tables have been created on disk for 15 minutes.
 #__FEATURE_PROMETHEUS_RULE_END__
 ---
 apiVersion: v1
@@ -147,45 +244,29 @@ metadata:
   annotations:
     grafana_folder: Middleware/MySQL
 data:
-  mysql-addon-overview.json: |
+  mysql-addon-overview.json: |-
     {
-      "annotations": {"list": []},
-      "editable": true,
-      "panels": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
-          "targets": [{"expr": "min(mysql_up{namespace=\"__NAMESPACE__\"})", "refId": "A"}],
-          "title": "MySQL Up",
-          "type": "stat"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
-          "targets": [{"expr": "max(mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"})", "refId": "A"}],
-          "title": "Threads Connected",
-          "type": "stat"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
-          "targets": [{"expr": "increase(mysql_global_status_slow_queries{namespace=\"__NAMESPACE__\"}[1h])", "refId": "A"}],
-          "title": "Slow Queries / 1h",
-          "type": "stat"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
-          "targets": [{"expr": "rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m])", "refId": "A"}],
-          "title": "Query Rate",
-          "type": "stat"
-        }
+      "annotations":{"list":[]},
+      "editable":true,
+      "panels":[
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":0,"y":0},"targets":[{"expr":"max(mysql_up{namespace=\"__NAMESPACE__\"})","refId":"A"}],"title":"MySQL Up","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":4,"y":0},"targets":[{"expr":"max(mysql_global_status_uptime{namespace=\"__NAMESPACE__\"})","refId":"A"}],"fieldConfig":{"defaults":{"unit":"s"}},"title":"Uptime","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":8,"y":0},"targets":[{"expr":"max(mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"}) / clamp_min(max(mysql_global_variables_max_connections{namespace=\"__NAMESPACE__\"}),1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Connection Usage","type":"gauge"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":12,"y":0},"targets":[{"expr":"max(mysql_global_status_threads_running{namespace=\"__NAMESPACE__\"})","refId":"A"}],"title":"Threads Running","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":16,"y":0},"targets":[{"expr":"sum(rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m]))","refId":"A"}],"fieldConfig":{"defaults":{"unit":"ops"}},"title":"QPS","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":20,"y":0},"targets":[{"expr":"increase(mysql_global_status_slow_queries{namespace=\"__NAMESPACE__\"}[10m]) / clamp_min(increase(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[10m]),1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Slow Query Ratio / 10m","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":8,"x":0,"y":4},"targets":[{"expr":"rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"questions/s","refId":"A"},{"expr":"rate(mysql_global_status_com_select{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"select/s","refId":"B"},{"expr":"rate(mysql_global_status_com_insert{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"insert/s","refId":"C"},{"expr":"rate(mysql_global_status_com_update{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"update/s","refId":"D"},{"expr":"rate(mysql_global_status_com_delete{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"delete/s","refId":"E"}],"title":"Query Throughput","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":8,"x":8,"y":4},"targets":[{"expr":"mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"}","legendFormat":"connected","refId":"A"},{"expr":"mysql_global_status_threads_running{namespace=\"__NAMESPACE__\"}","legendFormat":"running","refId":"B"}],"title":"Connections & Threads","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":8,"x":16,"y":4},"targets":[{"expr":"increase(mysql_global_status_innodb_deadlocks{namespace=\"__NAMESPACE__\"}[10m])","legendFormat":"deadlocks / 10m","refId":"A"},{"expr":"mysql_global_status_innodb_row_lock_current_waits{namespace=\"__NAMESPACE__\"}","legendFormat":"lock waits","refId":"B"}],"title":"InnoDB Contention","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":0,"y":12},"targets":[{"expr":"(1 - increase(mysql_global_status_innodb_buffer_pool_reads{namespace=\"__NAMESPACE__\"}[15m]) / clamp_min(increase(mysql_global_status_innodb_buffer_pool_read_requests{namespace=\"__NAMESPACE__\"}[15m]),1)) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Buffer Pool Hit Ratio","type":"gauge"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":8,"y":12},"targets":[{"expr":"increase(mysql_global_status_created_tmp_disk_tables{namespace=\"__NAMESPACE__\"}[15m]) / clamp_min(increase(mysql_global_status_created_tmp_tables{namespace=\"__NAMESPACE__\"}[15m]),1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Temporary Tables on Disk","type":"gauge"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":16,"y":12},"targets":[{"expr":"mysql_binlog_size_bytes{namespace=\"__NAMESPACE__\"}","refId":"A"}],"fieldConfig":{"defaults":{"unit":"bytes"}},"title":"Binlog Size","type":"timeseries"}
       ],
-      "schemaVersion": 39,
-      "style": "dark",
-      "tags": ["archinfra", "mysql"],
-      "templating": {"list": []},
-      "time": {"from": "now-6h", "to": "now"},
-      "title": "MySQL Addon Overview",
-      "version": 1
+      "refresh":"30s",
+      "schemaVersion":39,
+      "tags":["archinfra","mysql","addon"],
+      "time":{"from":"now-6h","to":"now"},
+      "title":"MySQL / External Overview",
+      "uid":"archinfra-mysql-addon-v2",
+      "version":2
     }
