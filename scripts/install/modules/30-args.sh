@@ -51,10 +51,39 @@ parse_args() {
         RESOURCE_PROFILE="$2"
         shift 2
         ;;
+      --innodb-buffer-pool-size)
+        MYSQL_INNODB_BUFFER_POOL_SIZE="$2"
+        MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT="true"
+        shift 2
+        ;;
+      --mysql-log-size-limit)
+        MYSQL_LOG_SIZE_LIMIT="$2"
+        shift 2
+        ;;
       --root-password)
         MYSQL_ROOT_PASSWORD="$2"
         MYSQL_ROOT_PASSWORD_EXPLICIT="true"
         shift 2
+        ;;
+      --enable-remote-root)
+        REMOTE_ROOT_ENABLED="true"
+        shift
+        ;;
+      --disable-remote-root)
+        REMOTE_ROOT_ENABLED="false"
+        shift
+        ;;
+      --root-remote-host)
+        ROOT_REMOTE_HOST="$2"
+        shift 2
+        ;;
+      --enable-native-password)
+        MYSQL_NATIVE_PASSWORD_ENABLED="true"
+        shift
+        ;;
+      --disable-native-password)
+        MYSQL_NATIVE_PASSWORD_ENABLED="false"
+        shift
         ;;
       --auth-secret)
         AUTH_SECRET="$2"
@@ -95,7 +124,7 @@ parse_args() {
       --registry)
         REGISTRY_REPO="$2"
         REGISTRY_ADDR="${2%%/*}"
-        MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.0.46"
+        MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.4.11"
         MYSQL_EXPORTER_IMAGE="${REGISTRY_REPO}/mysqld-exporter:v0.19.0"
         FLUENTBIT_IMAGE="${REGISTRY_REPO}/fluent-bit:3.0.7"
         BUSYBOX_IMAGE="${REGISTRY_REPO}/busybox:v1"
