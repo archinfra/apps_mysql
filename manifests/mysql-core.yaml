@@ -1,0 +1,302 @@
+#__FEATURE_MONITORING_START__
+apiVersion: v1
+kind: Secret
+metadata:
+  name: __ADDON_EXPORTER_SECRET__
+  labels:
+    app: __APP_NAME__
+    monitoring.archinfra.io/component: mysqld-exporter
+type: Opaque
+stringData:
+  .my.cnf: |
+    [client]
+    user=__ADDON_EXPORTER_USERNAME__
+    password=__ADDON_EXPORTER_PASSWORD__
+    host=127.0.0.1
+    port=3306
+#__FEATURE_MONITORING_END__
+---
+#__FEATURE_FLUENTBIT_START__
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __FLUENTBIT_CONFIGMAP__
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush 1
+        Daemon Off
+        Log_Level info
+
+    [INPUT]
+        Name tail
+        Tag mysql.slow
+        Path /var/log/mysql/slow.log
+        DB /tmp/mysql-slow.db
+        Read_from_Head true
+        Refresh_Interval 5
+        Skip_Long_Lines On
+
+    [FILTER]
+        Name modify
+        Match mysql.*
+        Add namespace __NAMESPACE__
+        Add statefulset __STS_NAME__
+        Add app __APP_NAME__
+
+    [OUTPUT]
+        Name stdout
+        Match *
+#__FEATURE_FLUENTBIT_END__
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: __SERVICE_NAME__
+spec:
+  clusterIP: None
+  selector:
+    app: __APP_NAME__
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+#__FEATURE_MONITORING_START__
+apiVersion: v1
+kind: Service
+metadata:
+  name: __METRICS_SERVICE_NAME__
+  labels:
+    app: __APP_NAME__
+    metrics: "enabled"
+spec:
+  selector:
+    app: __APP_NAME__
+  ports:
+    - name: metrics
+      port: __METRICS_PORT__
+      targetPort: metrics
+#__FEATURE_MONITORING_END__
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: __STS_NAME__
+spec:
+  serviceName: __SERVICE_NAME__
+  replicas: __MYSQL_REPLICAS__
+  selector:
+    matchLabels:
+      app: __APP_NAME__
+  template:
+    metadata:
+      labels:
+        app: __APP_NAME__
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: init-mysql
+          image: __BUSYBOX_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              hostname=$(hostname)
+              ordinal="${hostname##*-}"
+              if ! echo "$ordinal" | grep -qE '^[0-9]+$'; then
+                echo "Failed to extract ordinal from hostname: $hostname"
+                exit 1
+              fi
+              server_id=$((100 + ordinal))
+              echo "[mysqld]" > /mnt/conf.d/server-id.cnf
+              echo "server-id=$server_id" >> /mnt/conf.d/server-id.cnf
+              echo "report_host=$(hostname)" >> /mnt/conf.d/server-id.cnf
+              mkdir -p /mnt/mysql-log
+              chmod 0777 /mnt/mysql-log
+              : > /mnt/mysql-log/error.log
+              : > /mnt/mysql-log/slow.log
+              chmod 0666 /mnt/mysql-log/error.log /mnt/mysql-log/slow.log
+          volumeMounts:
+            - name: conf-dynamic
+              mountPath: /mnt/conf.d
+            - name: mysql-log
+              mountPath: /mnt/mysql-log
+          resources:
+            requests:
+              cpu: __MYSQL_INIT_REQUEST_CPU__
+              memory: __MYSQL_INIT_REQUEST_MEM__
+            limits:
+              cpu: __MYSQL_INIT_LIMIT_CPU__
+              memory: __MYSQL_INIT_LIMIT_MEM__
+      containers:
+        - name: mysql
+          image: __MYSQL_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /var/log/mysql
+              touch /var/log/mysql/error.log /var/log/mysql/slow.log
+              chmod 0666 /var/log/mysql/error.log /var/log/mysql/slow.log
+              tail -n0 -F /var/log/mysql/error.log >&2 &
+#__FEATURE_STDOUT_LOGGING_START__
+              tail -n0 -F /var/log/mysql/slow.log >&1 &
+#__FEATURE_STDOUT_LOGGING_END__
+              if command -v docker-entrypoint.sh >/dev/null 2>&1; then
+                exec docker-entrypoint.sh mysqld
+              fi
+              exec /entrypoint.sh mysqld
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: __AUTH_SECRET__
+                  key: mysql-root-password
+          ports:
+            - name: mysql
+              containerPort: 3306
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: config
+              mountPath: /etc/my.cnf
+              subPath: my.cnf
+            - name: conf-dynamic
+              mountPath: /etc/mysql/conf.d/server-id.cnf
+              subPath: server-id.cnf
+            - name: socket-dir
+              mountPath: /var/run/mysqld
+            - name: probes
+              mountPath: /usr/local/bin/probes
+            - name: mysql-log
+              mountPath: /var/log/mysql
+          startupProbe:
+            exec:
+              command:
+                - /usr/local/bin/probes/readinessprobe.sh
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/probes/livenessprobe.sh
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/probes/readinessprobe.sh
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: __MYSQL_REQUEST_CPU__
+              memory: __MYSQL_REQUEST_MEM__
+            limits:
+              cpu: __MYSQL_LIMIT_CPU__
+              memory: __MYSQL_LIMIT_MEM__
+#__FEATURE_MONITORING_START__
+        - name: mysqld-exporter
+          image: __MYSQL_EXPORTER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config.my-cnf=/etc/mysql-exporter/.my.cnf"
+            - "--collect.info_schema.innodb_metrics"
+            - "--collect.info_schema.processlist"
+            - "--collect.binlog_size"
+          ports:
+            - name: metrics
+              containerPort: __METRICS_PORT__
+          volumeMounts:
+            - name: exporter-auth
+              mountPath: /etc/mysql-exporter
+              readOnly: true
+          resources:
+            requests:
+              cpu: __MYSQL_EXPORTER_REQUEST_CPU__
+              memory: __MYSQL_EXPORTER_REQUEST_MEM__
+            limits:
+              cpu: __MYSQL_EXPORTER_LIMIT_CPU__
+              memory: __MYSQL_EXPORTER_LIMIT_MEM__
+#__FEATURE_MONITORING_END__
+#__FEATURE_FLUENTBIT_START__
+        - name: fluent-bit
+          image: __FLUENTBIT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - /fluent-bit/etc/fluent-bit.conf
+          volumeMounts:
+            - name: mysql-log
+              mountPath: /var/log/mysql
+            - name: fluent-bit-config
+              mountPath: /fluent-bit/etc
+          resources:
+            requests:
+              cpu: __FLUENTBIT_REQUEST_CPU__
+              memory: __FLUENTBIT_REQUEST_MEM__
+            limits:
+              cpu: __FLUENTBIT_LIMIT_CPU__
+              memory: __FLUENTBIT_LIMIT_MEM__
+#__FEATURE_FLUENTBIT_END__
+      volumes:
+        - name: config
+          configMap:
+            name: __MYSQL_CONFIGMAP__
+        - name: probes
+          configMap:
+            name: __PROBE_CONFIGMAP__
+            defaultMode: 0755
+        - name: mysql-log
+          emptyDir:
+            sizeLimit: __MYSQL_LOG_SIZE_LIMIT__
+#__FEATURE_MONITORING_START__
+        - name: exporter-auth
+          secret:
+            secretName: __ADDON_EXPORTER_SECRET__
+#__FEATURE_MONITORING_END__
+#__FEATURE_FLUENTBIT_START__
+        - name: fluent-bit-config
+          configMap:
+            name: __FLUENTBIT_CONFIGMAP__
+#__FEATURE_FLUENTBIT_END__
+        - name: conf-dynamic
+          emptyDir: {}
+        - name: socket-dir
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: __STORAGE_CLASS__
+        resources:
+          requests:
+            storage: __STORAGE_SIZE__
+---
+#__FEATURE_NODEPORT_START__
+apiVersion: v1
+kind: Service
+metadata:
+  name: __NODEPORT_SERVICE_NAME__
+spec:
+  type: NodePort
+  selector:
+    app: __APP_NAME__
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+      nodePort: __NODE_PORT__
+#__FEATURE_NODEPORT_END__

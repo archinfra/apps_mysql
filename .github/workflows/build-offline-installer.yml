@@ -60,6 +60,8 @@ jobs:
           grep -q 'mysql:8.4.11' scripts/install/modules/00-header.sh
           grep -q 'mysqld-exporter:v0.19.0' scripts/install/modules/00-header.sh
           grep -q 'NODEPORT_ENABLED="false"' scripts/install/modules/00-header.sh
+          grep -q 'REMOTE_ROOT_ENABLED="true"' scripts/install/modules/00-header.sh
+          grep -q 'MYSQL_NATIVE_PASSWORD_ENABLED="true"' scripts/install/modules/00-header.sh
           grep -q 'MYSQL_ROOT_PASSWORD=""' scripts/install/modules/00-header.sh
           grep -q '仅支持单实例交付' scripts/install/modules/65-monitoring-bootstrap.sh
           grep -q 'local_infile=OFF' manifests/mysql-runtime-config.yaml
@@ -151,6 +153,38 @@ jobs:
       - name: Build installer
         run: |
           ./build.sh --arch "${{ matrix.arch }}" --profile "${{ matrix.profile }}" --version "${{ needs.meta.outputs.version_tag }}"
+
+      - name: Validate MySQL 8.4 runtime configuration
+        if: matrix.profile == 'integrated'
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '
+            /^  my.cnf: \|/ { in_block=1; next }
+            in_block {
+              if ($0 ~ /^    /) {
+                sub(/^    /, "")
+                print
+                next
+              }
+              exit
+            }
+          ' manifests/mysql-runtime-config.yaml \
+            | sed \
+                -e 's/__MYSQL_INNODB_BUFFER_POOL_SIZE__/1G/g' \
+                -e 's/__MYSQL_SLOW_QUERY_TIME__/2/g' \
+            > /tmp/mysql-8.4-validate.cnf
+
+          mkdir -p /tmp/mysql-validate-log
+          chmod 0777 /tmp/mysql-validate-log
+          docker run --rm \
+            --platform "linux/${{ matrix.arch }}" \
+            --user mysql \
+            --entrypoint mysqld \
+            -v /tmp/mysql-8.4-validate.cnf:/etc/my.cnf:ro \
+            -v /tmp/mysql-validate-log:/var/log/mysql \
+            "sealos.hub:5000/kube4/mysql:8.4.11" \
+            --validate-config
 
       - name: Verify checksum
         run: |
