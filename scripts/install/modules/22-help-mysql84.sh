@@ -11,12 +11,8 @@ install 仅在 integrated 包中可用，当前交付基线为 MySQL 8.4.11 LTS�
   standard  标准模式：MySQL request 1C/4Gi，limit 2C/8Gi，Buffer Pool 5G，新装 PVC 默认 100Gi（默认）
   large     大规格模式：MySQL request 2C/8Gi，limit 4C/16Gi，Buffer Pool 10G，新装 PVC 默认 500Gi
 
-兼容别名:
-  low -> lite
-  mid / midd / middle / medium -> standard
-  high -> large
-
 重要说明:
+  - resource-profile 只接受 lite / standard / large，其他名称直接报错，避免交付口径分叉。
   - 2C8G / 1C2G / 4C16G 指 MySQL 主容器 limit；request 默认约为 50%，便于 Kubernetes 调度。
   - mysqld-exporter / Fluent Bit / initContainer 有各自的小额资源开销，不计入上述 MySQL 主容器规格。
   - 新安装时，profile 同时给出 CPU、内存、InnoDB Buffer Pool 和 PVC 默认容量。
@@ -29,7 +25,7 @@ install 仅在 integrated 包中可用，当前交付基线为 MySQL 8.4.11 LTS�
   --root-password <password>        默认: 自动生成随机密码；已有 Secret/${AUTH_SECRET} 时复用
   --auth-secret <name>              默认: mysql-auth
   --mysql-replicas <num>            固定: 1（当前不提供伪多副本）
-  --resource-profile <name>         默认: standard；支持 lite|standard|large
+  --resource-profile <name>         默认: standard；仅支持 lite|standard|large
   --storage-class <name>            默认: nfs；生产建议显式改为块存储类
   --storage-size <size>             覆盖 profile 的 PVC 容量，例如 200Gi
   --innodb-buffer-pool-size <size>  覆盖 profile 的 Buffer Pool，例如 6G
@@ -114,7 +110,6 @@ show_help_params() {
       lite      MySQL limit 1C/2Gi，request 500m/1Gi，Buffer Pool 1G，PVC 默认 20Gi
       standard  MySQL limit 2C/8Gi，request 1C/4Gi，Buffer Pool 5G，PVC 默认 100Gi（默认）
       large     MySQL limit 4C/16Gi，request 2C/8Gi，Buffer Pool 10G，PVC 默认 500Gi
-      兼容: low=lite, mid/midd/middle/medium=standard, high=large
   --storage-class <name>            默认 nfs；生产建议 Ceph RBD / SAN / Local PV / 云盘
   --storage-size <size>             显式覆盖 profile，例如 200Gi、1Ti
   --innodb-buffer-pool-size <size>  显式覆盖 profile，例如 6G、12G

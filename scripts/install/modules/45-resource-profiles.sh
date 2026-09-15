@@ -25,7 +25,7 @@ apply_resource_profile() {
   fi
 
   case "${RESOURCE_PROFILE,,}" in
-    lite|small|compact|low)
+    lite)
       RESOURCE_PROFILE="lite"
       set_profile_mysql_resource_default MYSQL_REQUEST_CPU MYSQL_REQUEST_CPU_EXPLICIT "500m"
       set_profile_mysql_resource_default MYSQL_REQUEST_MEM MYSQL_REQUEST_MEM_EXPLICIT "1Gi"
@@ -50,7 +50,7 @@ apply_resource_profile() {
         STORAGE_SIZE="20Gi"
       fi
       ;;
-    standard|mid|midd|middle|medium)
+    standard)
       RESOURCE_PROFILE="standard"
       set_profile_mysql_resource_default MYSQL_REQUEST_CPU MYSQL_REQUEST_CPU_EXPLICIT "1"
       set_profile_mysql_resource_default MYSQL_REQUEST_MEM MYSQL_REQUEST_MEM_EXPLICIT "4Gi"
@@ -75,7 +75,7 @@ apply_resource_profile() {
         STORAGE_SIZE="100Gi"
       fi
       ;;
-    large|high)
+    large)
       RESOURCE_PROFILE="large"
       set_profile_mysql_resource_default MYSQL_REQUEST_CPU MYSQL_REQUEST_CPU_EXPLICIT "2"
       set_profile_mysql_resource_default MYSQL_REQUEST_MEM MYSQL_REQUEST_MEM_EXPLICIT "8Gi"
@@ -101,7 +101,7 @@ apply_resource_profile() {
       fi
       ;;
     *)
-      die "resource-profile 仅支持 lite|standard|large；兼容别名: low->lite, mid/midd/middle/medium->standard, high->large"
+      die "resource-profile 仅支持 lite|standard|large"
       ;;
   esac
 

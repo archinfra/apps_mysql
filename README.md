@@ -41,7 +41,7 @@ mysql-benchmark-v1.6.0-<arch>.run
 
 ## 2. 三档正式资源规格
 
-`--resource-profile` 是 MySQL 私有化交付的官方规格参数。
+`--resource-profile` 是 MySQL 私有化交付的官方规格参数，并且**只接受以下三个值**：
 
 | Profile | 中文名称 | MySQL Request | MySQL Limit | InnoDB Buffer Pool | 新装 PVC 默认值 | 典型用途 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -49,13 +49,7 @@ mysql-benchmark-v1.6.0-<arch>.run
 | `standard` | 标准模式 | `1C / 4Gi` | **`2C / 8Gi`** | `5G` | `100Gi` | **默认标准交付** |
 | `large` | 大规格模式 | `2C / 8Gi` | **`4C / 16Gi`** | `10G` | `500Gi` | 中高负载、较大工作集 |
 
-兼容旧参数：
-
-```text
-low                 -> lite
-mid / midd / medium -> standard
-high                -> large
-```
+不再提供其他 profile 名称或别名。这样安装命令、交付文档、验收记录和运维口径始终只有 `lite / standard / large` 三种。
 
 其中 `1C2G / 2C8G / 4C16G` 指 **MySQL 主容器的 limit**。默认 requests 约为 limit 的 50%，用于 Kubernetes 调度；`mysqld-exporter`、Fluent Bit 和 initContainer 有独立的小额资源开销。
 
@@ -162,7 +156,7 @@ PVC           : 100Gi
 - StatefulSet `volumeClaimTemplates` 属于 immutable 字段，installer 会保留旧模板值并直接 patch 现有 PVC。
 - 已绑定 PVC **不能通过 reconcile 原地切换 StorageClass**；更换存储类型必须走新 PVC + 数据迁移流程。
 
-这套规则保证旧环境从此前 `20Gi` 默认值升级到新的 `standard=100Gi` 时，不会因为一次普通 reconcile 被意外改盘。
+这套规则保证历史环境不会因为新版 profile 默认容量变化，在普通 reconcile 时被意外改盘。
 
 ---
 
