@@ -19,6 +19,10 @@ EXPORTER_MANIFESTS = [
 ]
 RUNTIME_CONFIG = ROOT / "manifests" / "mysql-runtime-config.yaml"
 CORE_MANIFEST = ROOT / "manifests" / "mysql-core.yaml"
+HEADER_MODULE = ROOT / "scripts" / "install" / "modules" / "00-header.sh"
+HELP_MODULE = ROOT / "scripts" / "install" / "modules" / "22-help-mysql84.sh"
+RESOURCE_PROFILE_MODULE = ROOT / "scripts" / "install" / "modules" / "45-resource-profiles.sh"
+STORAGE_RECONCILE_MODULE = ROOT / "scripts" / "install" / "modules" / "57-storage-reconcile.sh"
 BOOTSTRAP_MODULE = ROOT / "scripts" / "install" / "modules" / "65-monitoring-bootstrap.sh"
 LIFECYCLE_MODULE = ROOT / "scripts" / "install" / "modules" / "75-mysql84-install.sh"
 RENDER_MODULE = ROOT / "scripts" / "install" / "modules" / "55-delivery-render.sh"
@@ -121,8 +125,13 @@ def main() -> int:
             "automountServiceAccountToken: false",
             "enableServiceLinks: false",
             "sizeLimit: __MYSQL_LOG_SIZE_LIMIT__",
+            "cpu: __MYSQL_REQUEST_CPU__",
+            "memory: __MYSQL_REQUEST_MEM__",
+            "cpu: __MYSQL_LIMIT_CPU__",
+            "memory: __MYSQL_LIMIT_MEM__",
+            "storage: __STORAGE_SIZE__",
         ),
-        "delivery hardening setting",
+        "delivery hardening/resource setting",
     )
 
     all_manifest_text = "\n".join(
@@ -133,6 +142,71 @@ def main() -> int:
             raise SystemExit(f"manifests: legacy artifact remains: {legacy}")
     if (ROOT / "manifests" / "innodb-mysql.yaml").exists():
         raise SystemExit("manifests/innodb-mysql.yaml: legacy combined manifest must be removed")
+
+    require_text(
+        HEADER_MODULE,
+        (
+            'RESOURCE_PROFILE="standard"',
+            'STORAGE_CLASS=""',
+            'STORAGE_SIZE=""',
+            'STORAGE_CLASS_EXPLICIT="false"',
+            'STORAGE_SIZE_EXPLICIT="false"',
+        ),
+        "resource profile default",
+    )
+
+    require_text(
+        RESOURCE_PROFILE_MODULE,
+        (
+            'RESOURCE_PROFILE="lite"',
+            'MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "1"',
+            'MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "2Gi"',
+            'MYSQL_INNODB_BUFFER_POOL_SIZE="1G"',
+            'STORAGE_SIZE="20Gi"',
+            'RESOURCE_PROFILE="standard"',
+            'MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "2"',
+            'MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "8Gi"',
+            'MYSQL_INNODB_BUFFER_POOL_SIZE="5G"',
+            'STORAGE_SIZE="100Gi"',
+            'RESOURCE_PROFILE="large"',
+            'MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "4"',
+            'MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "16Gi"',
+            'MYSQL_INNODB_BUFFER_POOL_SIZE="10G"',
+            'STORAGE_SIZE="500Gi"',
+            "low->lite",
+            "high->large",
+            "不会因 resource-profile 自动改盘",
+            "不能通过 reconcile 原地改为",
+        ),
+        "canonical resource profile invariant",
+    )
+
+    require_text(
+        STORAGE_RECONCILE_MODULE,
+        (
+            "volumeClaimTemplates is immutable",
+            "kubectl patch pvc",
+            "allowVolumeExpansion=true",
+            "PVC 不支持缩容",
+        ),
+        "safe PVC resize behavior",
+    )
+
+    require_text(
+        HELP_MODULE,
+        (
+            "lite      精简模式",
+            "standard  标准模式",
+            "large     大规格模式",
+            "2C/8Gi",
+            "1C/2Gi",
+            "4C/16Gi",
+            "PVC 默认 100Gi",
+            "PVC 默认 20Gi",
+            "PVC 默认 500Gi",
+        ),
+        "resource profile help",
+    )
 
     require_text(
         BOOTSTRAP_MODULE,
@@ -183,6 +257,9 @@ def main() -> int:
         "--root-remote-host",
         "--enable-native-password",
         "--disable-native-password",
+        "--resource-profile",
+        "--storage-class",
+        "--storage-size",
         "--innodb-buffer-pool-size",
         "--mysql-log-size-limit",
     ):
@@ -199,7 +276,7 @@ def main() -> int:
 
     print(
         f"validated {total} Grafana dashboard JSON block(s), MySQL 8.4 hardening, "
-        "remote-root reconciliation, lifecycle safety and image BOM"
+        "resource profiles, storage reconcile, lifecycle safety and image BOM"
     )
     return 0
 

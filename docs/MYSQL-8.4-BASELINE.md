@@ -15,6 +15,60 @@ This release intentionally supports one MySQL instance only. `--mysql-replicas` 
 
 Multiple StatefulSet replicas are not treated as MySQL HA. Replication, failover and InnoDB Cluster are outside this release scope.
 
+## Delivery resource profiles
+
+The installer exposes three canonical delivery profiles through `--resource-profile`:
+
+| profile | purpose | MySQL request | MySQL limit | default `innodb_buffer_pool_size` | new-install PVC |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `lite` | demo / small deployment | `500m / 1Gi` | `1C / 2Gi` | `1G` | `20Gi` |
+| `standard` | default private-delivery baseline | `1C / 4Gi` | `2C / 8Gi` | `5G` | `100Gi` |
+| `large` | larger working set / higher load | `2C / 8Gi` | `4C / 16Gi` | `10G` | `500Gi` |
+
+The canonical default is `standard`.
+
+Compatibility aliases remain accepted:
+
+```text
+low                 -> lite
+mid/midd/middle/medium -> standard
+high                -> large
+```
+
+The CPU/memory number associated with each profile refers to the MySQL main-container limit. Requests are intentionally lower to leave scheduler flexibility. Exporter, optional Fluent Bit and initContainer resources are additional small overheads.
+
+`--innodb-buffer-pool-size` overrides the profile's buffer-pool default.
+
+Non-empty `MYSQL_REQUEST_CPU`, `MYSQL_REQUEST_MEM`, `MYSQL_LIMIT_CPU` and `MYSQL_LIMIT_MEM` environment values remain expert overrides and are not replaced by the profile resolver.
+
+## Storage baseline
+
+For a new installation, the selected resource profile supplies the default PVC request:
+
+```text
+lite      20Gi
+standard  100Gi
+large     500Gi
+```
+
+`--storage-size` overrides that default.
+
+The default StorageClass remains `nfs` only for backward compatibility. Production deployments should explicitly choose reliable block storage such as Ceph RBD, SAN, Local PV or cloud block volumes when available.
+
+### Existing PVC reconcile semantics
+
+Persistent storage is treated differently from CPU/memory because StatefulSet `volumeClaimTemplates` is immutable.
+
+Rules:
+
+1. Existing PVC + no explicit `--storage-size`: preserve the current PVC request, even if the selected profile has a different new-install default.
+2. Existing PVC + explicit `--storage-size`: reconcile the StatefulSet with its existing volumeClaimTemplate value, then patch the PVC request directly.
+3. PVC shrink is not supported by Kubernetes and is rejected.
+4. PVC expansion requires `StorageClass.allowVolumeExpansion=true`.
+5. A bound PVC cannot be moved to another StorageClass through ordinary reconcile. Storage-class changes require a new PVC and data migration.
+
+This prevents a historical 20Gi deployment from being silently changed just because the default profile later becomes `standard=100Gi`.
+
 ## Access and security defaults
 
 - NodePort is disabled by default.
@@ -56,6 +110,7 @@ Important settings:
 - `max_connections=300`
 - `thread_cache_size=64`
 - `max_allowed_packet=64M`
+- profile-aware `innodb_buffer_pool_size`
 - `innodb_log_buffer_size=64M`
 - `innodb_redo_log_capacity=1G`
 - `innodb_flush_log_at_trx_commit=1`
@@ -66,19 +121,7 @@ Important settings:
 - slow query log enabled, default threshold 2s
 - ROW binlog, GTID enabled, binlog retention 7 days
 
-### Resource profile and InnoDB buffer pool
-
-The resource profile now controls both Kubernetes memory limits and the default InnoDB Buffer Pool:
-
-| profile | MySQL memory limit | default `innodb_buffer_pool_size` |
-| --- | ---: | ---: |
-| low | 1Gi | 384M |
-| mid | 2Gi | 1G |
-| high | 4Gi | 2G |
-
-Use `--innodb-buffer-pool-size` for explicit project tuning.
-
-The default StorageClass remains `nfs` only for backward compatibility. Production deployments should explicitly choose reliable block storage such as Ceph RBD, SAN, Local PV or cloud block volumes when available.
+The profile defaults intentionally leave memory outside the Buffer Pool for connections, temporary tables, Performance Schema and other per-session/runtime allocations.
 
 ## Kubernetes lifecycle hardening
 
@@ -132,7 +175,7 @@ Thresholds are production starting points and should be tuned from real workload
 
 ## Manifest layout
 
-The old combined `innodb-mysql.yaml` has been removed. Runtime responsibilities are separated into:
+Runtime responsibilities are separated into:
 
 ```text
 mysql-core.yaml
@@ -140,7 +183,7 @@ mysql-runtime-config.yaml
 mysql-observability.yaml
 ```
 
-This prevents stale fixed-password health users or obsolete MySQL configuration from being applied first and overwritten later.
+The old combined `innodb-mysql.yaml` has been removed.
 
 ## Uninstall and data retention
 
