@@ -1,549 +1,844 @@
 # apps_mysql
 
-面向 Kubernetes 的 MySQL 离线交付与运维工具包。
+面向 Kubernetes 的 MySQL 8.4 LTS 离线交付、监控、压测与数据保护接入工具包。
 
-这个仓库不是单纯放一个 StatefulSet manifest，而是把下面几类能力按不同产物包做了拆分：
+当前标准交付基线：
 
-- MySQL 安装与对齐
-- 监控补装
-- 压测
-- 离线 `.run` 安装包交付
+- `apps_mysql`: `v1.6.0`
+- MySQL: `8.4.11 LTS`
+- `mysqld-exporter`: `v0.19.0`
+- 架构：`amd64` / `arm64`
+- 部署模式：**单实例、单副本**
+- 监控：默认开启
+- NodePort：默认关闭
+- root / exporter 密码：默认不再使用固定密码
 
-从当前版本开始，备份恢复统一接入独立数据保护系统；`mysql-installer` 会在安装阶段自动注册 MySQL 对应的 `BackupAddon/BackupSource/BackupPolicy`，不再单独交付 addon runner 镜像。
+> 当前版本明确只提供单实例 MySQL。`--mysql-replicas` 必须为 `1`；多副本 StatefulSet 不等于 MySQL HA。
 
-## 这套仓库是怎么设计的
+---
 
-`apps_mysql` 和其他单一中间件仓库不完全一样，它会构建出 3 类产物：
+## 1. 这个仓库解决什么问题
 
-- `mysql-installer-<arch>.run`
-- `mysql-monitoring-<arch>.run`
-- `mysql-benchmark-<arch>.run`
+仓库会构建 3 类离线 `.run` 产物：
 
-可以这样理解：
-
-- 想安装 MySQL 本体，用 `mysql-installer`
-- 已有 MySQL，只想补监控，用 `mysql-monitoring`
-- 只想做标准压测，用 `mysql-benchmark`
-
-也就是说，`apps_mysql` 已经把“数据库本体、外围监控、压测”拆开了，使用者不需要为了压测或补监控把整套安装器一起带上。
-
-## 产物包与能力边界
-
-### `mysql-installer-<arch>.run`
-
-适合：
-
-- 首次离线安装 MySQL
-- 对齐 StatefulSet / Service / PVC / Secret / ConfigMap
-- 同时决定是否启用 exporter、ServiceMonitor、NodePort、Fluent Bit sidecar
-
-支持动作：
-
-- `install`
-- `uninstall`
-- `status`
-- `addon-install`
-- `addon-uninstall`
-- `addon-status`
-- `benchmark`
-- `help`
-
-### `mysql-monitoring-<arch>.run`
-
-适合：
-
-- 集群里已经有 MySQL
-- 不想因为补监控而改动 MySQL StatefulSet
-- 只想额外部署一个独立 exporter 和 `ServiceMonitor`
-
-支持动作：
-
-- `addon-install`
-- `addon-uninstall`
-- `addon-status`
-- `status`
-- `help`
-
-### `mysql-benchmark-<arch>.run`
-
-适合：
-
-- 只对某个 MySQL 进行标准化压测
-- 不携带安装和监控能力
-
-支持动作：
-
-- `benchmark`
-- `help`
-
-## 默认部署契约
-
-如果你直接使用 `mysql-installer` 默认安装，关键默认值如下：
-
-- namespace: `aict`
-- StatefulSet name: `mysql`
-- Service name: `mysql`
-- NodePort Service name: `mysql-nodeport`
-- auth secret: `mysql-auth`
-- replicas: `1`
-- root password: `passw0rd`
-- storage class: `nfs`
-- storage size: `10Gi`
-- MySQL port: `3306`
-- NodePort: `30306`
-- monitoring: `true`
-- ServiceMonitor: `true`
-- metrics service name: `mysql-metrics`
-- metrics port: `9104`
-- Fluent Bit sidecar: `false`
-- wait timeout: `10m`
-- target image repo: `sealos.hub:5000/kube4`
-- resource profile: `mid`
-
-### Resource profile
-
-Installer now supports:
-
-- `--resource-profile low`
-- `--resource-profile mid`
-- `--resource-profile midd`
-- `--resource-profile high`
-
-Default is `mid`. `midd` is accepted as an alias of `mid`.
-
-Profile intent:
-
-- `low`: demo or lightweight validation
-- `mid`: normal shared environment, baseline for `500-1000` concurrency and around `10000` users
-- `high`: heavier traffic or larger working set
-
-Per-profile baseline:
-
-| Profile | MySQL | Exporter | Fluent Bit | Init container |
-| --- | --- | --- | --- | --- |
-| `low` | `200m / 512Mi` request, `500m / 1Gi` limit | `50m / 64Mi` request, `100m / 128Mi` limit | `50m / 64Mi` request, `100m / 128Mi` limit | `20m / 32Mi` request, `100m / 64Mi` limit |
-| `mid` | `500m / 1Gi` request, `1 / 2Gi` limit | `100m / 128Mi` request, `200m / 256Mi` limit | `100m / 128Mi` request, `200m / 256Mi` limit | `50m / 64Mi` request, `200m / 128Mi` limit |
-| `high` | `1 / 2Gi` request, `2 / 4Gi` limit | `200m / 256Mi` request, `500m / 512Mi` limit | `200m / 256Mi` request, `500m / 512Mi` limit | `100m / 128Mi` request, `300m / 256Mi` limit |
-
-这套默认值是“单实例 MySQL + 默认开启监控 + 默认开放 NodePort”的交付方案。
-
-## 默认拓扑
-
-默认安装：
-
-```bash
-./mysql-installer-amd64.run install -y
+```text
+mysql-installer-<version>-<arch>.run
+mysql-monitoring-<version>-<arch>.run
+mysql-benchmark-<version>-<arch>.run
 ```
 
-会创建：
+能力边界如下：
 
-- 1 个 MySQL StatefulSet
-- 1 个 headless Service：`mysql`
-- 1 个 NodePort Service：`mysql-nodeport`
-- 1 个 metrics Service：`mysql-metrics`
-- 1 个 `ServiceMonitor`
-- 1 个 PVC
-- 1 个 MySQL root Secret
-- 1 个 probe ConfigMap
-- 1 个 init users ConfigMap
-- 1 个 MySQL 配置 ConfigMap
-
-如果启用了 `--enable-fluentbit`，还会多出：
-
-- 1 个 Fluent Bit sidecar
-- 1 个 Fluent Bit ConfigMap
-
-## 默认访问地址、端口和账密
-
-这部分是给新接手的人和 AI 最常用的“系统契约”。
-
-### 集群内访问
-
-默认 MySQL StatefulSet 名和 headless Service 都是 `mysql`，因此常用地址是：
-
-- 直接连单实例：`mysql-0.mysql.aict.svc.cluster.local:3306`
-- 通过 service 访问：`mysql.aict.svc.cluster.local:3306`
-
-对于需要稳定连接单实例的下游组件，推荐使用：
-
-- `mysql-0.mysql.aict`
-
-这也是 `apps_nacos` 当前默认使用的 MySQL 主机名。
-
-### 集群外访问
-
-默认启用 NodePort，因此可以通过任意工作节点 IP 访问：
-
-- `<NODE_IP>:30306`
-
-### 默认账号体系
-
-默认会初始化这些账号：
-
-- `root`
-  密码来自 `mysql-auth` Secret，默认值是 `passw0rd`
-- `localroot@localhost`
-  默认密码：`local@paasw0rd`
-  主要用于容器内本地维护
-- `mysqlhealthchecker@localhost`
-  默认密码：`health@passw0rd`
-  仅用于健康检查
-- `repl@%`
-  默认密码：`repl@passw0rd`
-  用于复制场景
-- `orch@%`
-  默认密码：`orch@passw0rd`
-  用于编排/巡检类场景
-
-如果你使用 `addon-install` 部署独立 exporter，还会额外创建：
-
-- `mysqld_exporter`
-  默认密码：`exporter@passw0rd`
-
-注意：
-
-- 这些密码是仓库默认值，适合测试和初始交付
-- 生产环境建议在首次安装时就显式改掉 `root` 密码
-- 如果你把这套文档给 AI 使用，默认也应该要求它优先显式传入生产密码，而不是依赖仓库默认值
-
-## 默认资源需求
-
-### MySQL 主容器
-
-默认主容器资源：
-
-- request: `500m CPU / 1Gi memory`
-- limit: `1 CPU / 2Gi memory`
-
-### 内嵌 exporter sidecar
-
-默认 exporter 资源：
-
-- request: `100m CPU / 128Mi memory`
-- limit: `200m CPU / 256Mi memory`
-
-### 可选 Fluent Bit sidecar
-
-开启 `--enable-fluentbit` 后，默认资源：
-
-- request: `100m CPU / 128Mi memory`
-- limit: `200m CPU / 256Mi memory`
-
-### 默认总量
-
-默认单实例并开启内嵌监控时：
-
-| 项目 | 默认值 |
+| 产物 | 用途 |
 | --- | --- |
-| CPU request | `600m` |
-| Memory request | `1152Mi` |
-| CPU limit | `1.2` |
-| Memory limit | `2304Mi` |
+| `mysql-installer` | 新装 / 对齐 MySQL、监控、日志、数据保护注册 |
+| `mysql-monitoring` | 给已有 MySQL 补独立 exporter / ServiceMonitor / Dashboard / Alert |
+| `mysql-benchmark` | 对现有 MySQL 执行标准化 sysbench 压测并输出报告 |
 
-如果同时启用了 Fluent Bit，则额外增加：
+备份恢复任务本身由独立 `dataprotection` 系统执行；`apps_mysql` 负责注册 `BackupAddon / BackupSource / BackupPolicy`。
 
-- request: `100m CPU / 128Mi memory`
-- limit: `200m CPU / 256Mi memory`
+---
 
-### 存储需求
+## 2. 最快开始
 
-默认 PVC：
-
-- `10Gi`
-
-如果你把副本数调成 `N`，最低持久化存储需求也应按 `N x 10Gi` 估算。
-
-## 日志设计
-
-日志这块是 `apps_mysql` 和其他仓库最不一样的地方之一，因为它同时考虑了：
-
-- `kubectl logs`
-- 平台日志采集
-- 可选 Fluent Bit sidecar
-
-当前默认行为：
-
-- 错误日志写入 `/var/log/mysql/error.log`
-- slow log 写入 `/var/log/mysql/slow.log`
-- 默认把错误日志转到容器 `stderr`
-- 默认把 slow log 转到容器 `stdout`
-
-所以默认就可以直接：
+### 2.1 新装一个默认单实例
 
 ```bash
-kubectl logs -n aict mysql-0 -c mysql
+./mysql-installer-v1.6.0-amd64.run install -y
 ```
 
-启用 `--enable-fluentbit` 后：
+默认会：
 
-- MySQL 错误日志仍保留在 `mysql` 容器 `stderr`
-- slow log 改为文件
-- `fluent-bit` sidecar 负责把 slow log 转发到自己的 `stdout`
+- 创建 namespace `aict`（不存在时）
+- 创建单副本 StatefulSet `mysql`
+- 创建 headless Service `mysql`
+- 创建 PVC `data-mysql-0`
+- 自动生成 root 密码并写入 `Secret/mysql-auth`
+- 默认开启 `mysqld-exporter v0.19.0`
+- 默认创建 metrics Service / ServiceMonitor / PrometheusRule
+- 默认创建 Grafana Dashboard ConfigMap
+- 默认关闭 NodePort
+- 如果 dataprotection CRD 与 BackupStorage 已存在，则自动注册数据保护对象
 
-适用建议：
-
-- 平台有统一日志采集时，优先直接采容器 stdout/stderr
-- 只有明确需要 Pod 内慢日志文件时，再启用 `--enable-fluentbit`
-
-## 监控设计
-
-MySQL 监控支持两种模式：
-
-### 模式 1：安装器内嵌监控
-
-由 `mysql-installer` 直接把 exporter sidecar 放进 MySQL Pod。
-
-默认行为：
-
-- `monitoring=true`
-- `serviceMonitor=true`
-- metrics Service：`mysql-metrics`
-- metrics 端口：`9104`
-- `ServiceMonitor` 标签：`monitoring.archinfra.io/stack=default`
-
-### 模式 2：addon 独立监控
-
-由 `mysql-monitoring` 或 `mysql-installer addon-install` 单独部署一个 exporter Deployment。
-
-默认对象：
-
-- Deployment：`mysql-exporter`
-- Service：`mysql-exporter`
-- Secret：`mysql-exporter-auth`
-- ServiceMonitor：`mysql-exporter-monitor`
-
-默认监控目标：
-
-- `mysql-0.mysql.aict:3306`
-
-### 和 Prometheus 的关系
-
-如果你的 Prometheus Stack 按我们统一方案启用了按标签发现，那么 MySQL 的默认 `ServiceMonitor` 会被自动发现，因为它默认带了：
-
-- `monitoring.archinfra.io/stack=default`
-
-## 和其他组件的依赖关系
-
-### MySQL 不依赖谁
-
-MySQL 默认不依赖这些组件启动：
-
-- Redis
-- Nacos
-- MinIO
-- RabbitMQ
-- MongoDB
-- Milvus
-
-### 谁常常依赖 MySQL
-
-在我们当前这套组件体系里，最直接依赖 MySQL 的是：
-
-- `apps_nacos`
-
-`apps_nacos` 的默认参数就是：
-
-- host: `mysql-0.mysql.aict`
-- port: `3306`
-- database: `frame_nacos_demo`
-- user: `root`
-
-所以如果你是先装 MySQL 再装 Nacos，这两个组件天然能接上。
-
-### 备份恢复边界
-
-`apps_mysql` 不直接执行备份恢复任务，但会负责把 MySQL 注册进独立数据保护系统。
-
-当前边界是：
-
-- 安装、监控、压测：`apps_mysql`
-- 备份恢复执行、多中心数据保护：独立数据保护系统
-- MySQL 备份接入注册：`mysql-installer`
-
-不要再从 `apps_mysql` 中寻找：
-
-- `backup`
-- `restore`
-- `verify-backup-restore`
-
-但可以直接通过 `install` 注册：
-
-- `BackupAddon/mysql-dump`
-- `BackupSource/<namespace>-<sts-name>`
-- `BackupPolicy/<namespace>-<sts-name>-backup`
-
-## 常见使用场景
-
-### 场景 1：首次安装单实例 MySQL
+查看 root 密码：
 
 ```bash
-./mysql-installer-amd64.run install \
-  --namespace aict \
-  --root-password 'StrongPassw0rd' \
+kubectl get secret -n aict mysql-auth \
+  -o jsonpath='{.data.mysql-root-password}' | base64 -d; echo
+```
+
+查看状态：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run status -n aict
+```
+
+集群内默认访问地址：
+
+```text
+mysql-0.mysql.aict.svc.cluster.local:3306
+```
+
+---
+
+## 3. 默认部署契约
+
+| 项目 | 默认值 | 说明 |
+| --- | --- | --- |
+| namespace | `aict` | 可通过 `--namespace` 修改 |
+| StatefulSet | `mysql` | 单副本 |
+| Service | `mysql` | headless Service |
+| replicas | `1` | 当前固定支持单实例 |
+| MySQL | `8.4.11` | LTS 基线 |
+| exporter | `v0.19.0` | 默认 sidecar |
+| root Secret | `mysql-auth` | 首次安装自动生成密码 |
+| StorageClass | `nfs` | **兼容默认值；生产建议显式指定块存储** |
+| PVC | `20Gi` | 生产通常应显式扩大 |
+| MySQL port | `3306` | ClusterIP 内访问 |
+| NodePort | 关闭 | 需要时显式 `--enable-nodeport` |
+| NodePort port | `30306` | 仅开启 NodePort 后生效 |
+| monitoring | 开启 | exporter + rules + dashboard |
+| ServiceMonitor | 开启 | CRD 不存在时自动跳过 |
+| metrics port | `9104` | `mysql-metrics` |
+| Fluent Bit | 关闭 | 默认依赖 stdout/stderr |
+| data protection | 开启 | 条件满足时自动注册 |
+| slow query threshold | `2s` | `--mysql-slow-query-time` 可调 |
+| wait timeout | `10m` | `--wait-timeout` 可调 |
+| resource profile | `mid` | `low / mid / high` |
+
+### 安装端依赖
+
+运行已经构建好的 `.run` 安装包时：
+
+- 必需：`kubectl`
+- 默认镜像导入/推送模式需要：`docker`
+- **不要求目标环境安装 `jq`**
+
+`jq` 只用于仓库侧执行 `build.sh` 构建离线安装包，不属于客户环境运行依赖。
+
+---
+
+## 4. 推荐安装方式
+
+### 4.1 测试 / Demo
+
+适合功能验证、小数据量环境：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run install \
+  --namespace mysql-demo \
+  --resource-profile low \
+  --storage-class nfs \
+  --storage-size 20Gi \
+  --disable-data-protection \
+  -y
+```
+
+推荐原则：
+
+- `low`
+- 20Gi 起步
+- NFS 可以用于测试
+- NodePort 仍建议默认关闭
+- 监控建议保留开启
+
+### 4.2 标准生产环境
+
+推荐作为大多数私有化项目的起点：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run install \
+  --namespace mysql-prod \
+  --storage-class ceph-rbd \
+  --storage-size 100Gi \
+  --resource-profile mid \
+  --root-password 'Strong-Password-Here' \
   --backup-storage-name minio-primary \
+  --backup-schedule '0 */6 * * *' \
+  --backup-retention-ref keep-last-3 \
   -y
 ```
 
-### 场景 2：安装时关闭 NodePort
+推荐原则：
+
+- 优先使用 Ceph RBD、SAN、Local PV、云盘等块存储
+- PVC 建议从 `100Gi` 起，根据业务增长评估
+- 监控、告警、Dashboard 保持默认开启
+- NodePort 保持关闭，通过业务网络、Gateway、VPN、跳板机等受控方式访问
+- root 密码可显式指定；不指定则安装器自动生成
+- 数据保护系统可用时保留默认注册
+
+### 4.3 较高负载 / 较大工作集
 
 ```bash
-./mysql-installer-amd64.run install \
-  --disable-nodeport \
-  --root-password 'StrongPassw0rd' \
+./mysql-installer-v1.6.0-amd64.run install \
+  --namespace mysql-prod \
+  --storage-class ceph-rbd \
+  --storage-size 500Gi \
+  --resource-profile high \
+  --mysql-slow-query-time 1 \
+  --root-password 'Strong-Password-Here' \
   -y
 ```
 
-### 场景 3：安装时关闭内嵌监控
+建议先使用 `mysql-benchmark` 在目标存储与节点上做压测，再确定最终资源配置。
+
+> `resource-profile` 只控制 Kubernetes CPU / Memory requests 与 limits，**不会自动按容器内存同比扩大 `innodb_buffer_pool_size`**。当前 MySQL runtime baseline 的 buffer pool 是 `512M`。如果是 4Gi、8Gi 或更大内存的生产实例，应根据实际工作集进一步定制 `manifests/mysql-runtime-config.yaml` 并重新构建交付包。
+
+### 4.4 确实需要 NodePort
+
+默认不开放 NodePort。如现场网络明确需要：
 
 ```bash
-./mysql-installer-amd64.run install \
-  --disable-monitoring \
-  --disable-service-monitor \
-  --root-password 'StrongPassw0rd' \
+./mysql-installer-v1.6.0-amd64.run install \
+  --namespace mysql-prod \
+  --enable-nodeport \
+  --node-port 30306 \
+  --root-password 'Strong-Password-Here' \
   -y
 ```
 
-### 场景 4：只给已有 MySQL 补独立监控
+外部访问：
 
-```bash
-./mysql-monitoring-amd64.run addon-install \
-  --namespace aict \
-  --mysql-host mysql-0.mysql.aict \
-  --mysql-password 'StrongPassw0rd' \
-  -y
+```text
+<NODE_IP>:30306
 ```
 
-### 场景 5：只做 benchmark
+生产环境开启 NodePort 后，应同时通过防火墙、ACL、NetworkPolicy 或上层网络控制来源地址。
 
-```bash
-./mysql-benchmark-amd64.run benchmark \
-  --namespace aict \
-  --mysql-host mysql-0.mysql.aict \
-  --mysql-password 'StrongPassw0rd' \
-  -y
+---
+
+## 5. Resource Profile
+
+支持：
+
+```text
+low
+mid
+midd   # mid 的兼容别名
+high
 ```
 
-## 给 AI 或自动化系统的执行规则
+| Profile | MySQL request | MySQL limit | Exporter request | Exporter limit | 建议用途 |
+| --- | --- | --- | --- | --- | --- |
+| `low` | `200m / 512Mi` | `500m / 1Gi` | `50m / 64Mi` | `100m / 128Mi` | Demo / 验证 |
+| `mid` | `500m / 1Gi` | `1 CPU / 2Gi` | `100m / 128Mi` | `200m / 256Mi` | 标准生产起点 |
+| `high` | `1 CPU / 2Gi` | `2 CPU / 4Gi` | `200m / 256Mi` | `500m / 512Mi` | 较高负载 |
 
-如果后续把安装包放到服务器上，希望由 AI 自动安装，这几个规则最重要。
+可选 Fluent Bit 对应资源也会随 profile 调整。
 
-### 默认优先策略
+这些 profile 是交付起点，不是容量承诺。最终资源必须结合：
 
-如果没有额外约束，优先使用：
+- 数据量
+- QPS / TPS
+- 活跃连接数
+- 热数据规模
+- SQL 类型
+- 磁盘 IOPS / latency
+- 备份窗口
 
-- `mysql-installer`
-- `namespace=aict`
-- 单实例
-- 开启监控
-- 开启 `ServiceMonitor`
-- 开启 NodePort
-- 显式传入 `--root-password`
+一起评估。
 
-### 成功标准
+---
 
-可以把下面这些作为安装成功信号：
+## 6. MySQL 8.4 默认运行配置
 
-- `mysql-0` Pod `Running`
-- `mysql` Service 存在
-- `mysql-nodeport` Service 存在
-- PVC 已绑定
-- `mysql-metrics` Service 存在
-- 如果集群有 `ServiceMonitor` CRD，则 `mysql-monitor` 存在
-- `kubectl logs` 能正常看到 MySQL 日志
+安装器会对齐 `manifests/mysql-runtime-config.yaml`，该文件是当前 MySQL 8.4 运行基线。
 
-### 失败信号
+### 6.1 安全与网络面
 
-- PVC 长时间 `Pending`
-- `mysql-0` `CrashLoopBackOff`
-- `mysql-auth` Secret 不存在或密码未正确传入
-- metrics Service 存在但 exporter 没启动
-- 误以为 `apps_mysql` 会直接执行 `backup/restore`；实际仍由 dataprotection 控制器执行
-
-## 常见排障命令
-
-```bash
-./mysql-installer-amd64.run status -n aict
-kubectl get pods,svc,pvc -n aict
-kubectl logs -n aict mysql-0 -c mysql --tail=200
-kubectl get servicemonitor -A | grep mysql
+```ini
+bind-address=0.0.0.0
+mysqlx=0
+skip_name_resolve=ON
+local_infile=OFF
+max_allowed_packet=64M
+max_connections=300
+back_log=128
+thread_cache_size=64
 ```
 
-如果是独立 addon 监控：
+说明：
 
-```bash
-kubectl get deploy,svc -n aict | grep mysql-exporter
-kubectl logs -n aict deploy/mysql-exporter --tail=200
+- `mysqlx=0`：默认关闭不使用的 X Protocol
+- `local_infile=OFF`：降低不必要的文件导入风险
+- `skip_name_resolve=ON`：避免授权解析依赖 DNS，并减少连接建立抖动
+- `max_connections=300`：给出可控上限，避免无限扩大连接占用
+
+### 6.2 InnoDB 与持久性
+
+```ini
+default_storage_engine=InnoDB
+innodb_flush_log_at_trx_commit=1
+sync_binlog=1
+innodb_buffer_pool_size=512M
+innodb_log_buffer_size=64M
+innodb_redo_log_capacity=1G
+innodb_file_per_table=ON
 ```
 
-## 构建与发布
+当前默认优先事务持久性，不为了 benchmark 使用高风险的异步刷盘参数。
 
-版本来源：
+### 6.3 临时表与缓存
 
-- 仓库根目录 `VERSION`
-- GitHub Release tag 统一使用 `v<version>`，例如 `v1.5.13`
-- `install.sh` 中显示的版本、`.run` 产物名、release 附件名都由同一版本规则生成
-
-当前构建会产出：
-
-- `mysql-installer-v<version>-<arch>.run`
-- `mysql-monitoring-v<version>-<arch>.run`
-- `mysql-benchmark-v<version>-<arch>.run`
-
-运行时依赖：
-
-- 目标机器需要 `kubectl`
-- 如需导入和推送离线镜像，还需要 `docker`
-- 最终 `.run` 安装包运行时不依赖 `jq`
-
-GitHub Actions 负责：
-
-- `main/master` 多架构构建
-- `v*` tag 发布 release
-
-本地构建示例：
-
-```bash
-./build.sh --arch amd64 --profile integrated
-./build.sh --arch arm64 --profile monitoring --version v1.5.13
-./build.sh --arch all --profile all --version v1.5.13
+```ini
+tmp_table_size=32M
+max_heap_table_size=32M
+table_open_cache=2000
+table_definition_cache=1400
 ```
 
-发布 tag 版本建议流程：
+不要简单把 `tmp_table_size` / `max_heap_table_size` 调得很大，因为这些配置与并发连接共同影响内存占用。
 
-1. 修改根目录 `VERSION`
-2. 本地执行一次 `./build.sh --arch amd64 --profile integrated` 做 smoke build
-3. 提交代码并推送
-4. 创建并推送同版本 tag，例如 `v1.5.13`
-5. GitHub Actions 自动生成 release 并上传带版本号的 `.run` 和 `.sha256`
-## Built-in Monitoring, Alerts, And Dashboards
+### 6.4 日志与可观测性
 
-Default install now enables:
+```ini
+performance_schema=ON
+log_error_verbosity=2
+slow_query_log=ON
+long_query_time=2
+log_queries_not_using_indexes=OFF
+```
 
-- `monitoring=true`
-- embedded exporter
-- `ServiceMonitor`
-- `PrometheusRule`
-- Grafana dashboard `ConfigMap`
+`long_query_time` 可通过安装参数调整：
 
-Grafana auto-import contract:
+```bash
+--mysql-slow-query-time 1
+```
 
-- dashboard label: `grafana_dashboard=1`
-- platform label: `monitoring.archinfra.io/stack=default`
-- folder annotation: `grafana_folder=Middleware/MySQL`
+### 6.5 Binlog / GTID
 
-Built-in alerts:
+```ini
+log_bin=mycluster
+binlog_format=ROW
+binlog_expire_logs_seconds=604800
+enforce_gtid_consistency=ON
+gtid_mode=ON
+```
 
-- `MySQLDown`
-- `MySQLConnectionsHigh`
-- `MySQLSlowQueriesHigh`
+默认保留 7 天 binlog，为审计、排障、备份和后续 PITR 能力预留基础。
 
-Built-in dashboard panels:
+### 如何做长期个性化 MySQL 配置
 
-- MySQL Up
-- Threads Connected
+对于以下参数：
+
+- `innodb_buffer_pool_size`
+- `innodb_redo_log_capacity`
+- `max_connections`
+- `tmp_table_size`
+- `table_open_cache`
+- binlog 保留周期
+
+当前没有全部暴露成 CLI 参数。需要长期固化时，推荐：
+
+1. 修改 `manifests/mysql-runtime-config.yaml`
+2. 提交代码评审
+3. 重新构建 `.run` 安装包
+4. 在测试环境验证后再交付
+
+不建议把 `kubectl edit configmap` 当成长期配置管理方式，因为再次执行 installer 会按仓库基线重新对齐。
+
+---
+
+## 7. 密码与安全模型
+
+### root
+
+首次安装：
+
+- 传 `--root-password`：使用显式密码
+- 不传：自动生成随机密码
+
+已有环境再次执行 installer：
+
+- 如果 `Secret/mysql-auth` 已存在，会复用已有密码
+- 不会因为 reconcile 自动随机换 root 密码
+
+查看密码：
+
+```bash
+kubectl get secret -n aict mysql-auth \
+  -o jsonpath='{.data.mysql-root-password}' | base64 -d; echo
+```
+
+### mysqld-exporter
+
+Exporter 不再使用 root 账号。
+
+默认账号：
+
+```text
+mysqld_exporter
+```
+
+安装器自动生成 exporter 密码，并创建 / 对齐低权限账号，权限主要包括：
+
+```text
+PROCESS
+REPLICATION CLIENT
+SELECT
+```
+
+同时限制 `MAX_USER_CONNECTIONS 3`。
+
+### 健康检查
+
+MySQL 8.4 runtime probe 使用本地 TCP `mysqladmin ping`，不再依赖旧的固定密码 health-check 用户。
+
+---
+
+## 8. 监控设计
+
+默认内嵌：
+
+```text
+mysqld-exporter v0.19.0
+metrics Service: mysql-metrics:9104
+ServiceMonitor: mysql-monitor
+PrometheusRule: mysql-alerts
+Grafana folder: Middleware/MySQL
+```
+
+Prometheus 发现协议：
+
+```yaml
+monitoring.archinfra.io/stack: default
+```
+
+Grafana Dashboard 自动发现：
+
+```yaml
+grafana_dashboard: "1"
+grafana_folder: Middleware/MySQL
+```
+
+### 默认 exporter collectors
+
+除 exporter 默认 collector 外，额外开启：
+
+```text
+collect.info_schema.innodb_metrics
+collect.info_schema.processlist
+collect.binlog_size
+```
+
+没有默认全开高基数 performance schema collector，避免不必要的 Prometheus cardinality 和数据库采集开销。
+
+---
+
+## 9. Grafana Dashboard
+
+默认创建两套 Dashboard：
+
+```text
+Middleware/MySQL
+├── MySQL / Overview
+└── MySQL / Performance
+```
+
+### MySQL / Overview
+
+用于值班与快速判断：
+
+- MySQL Up / Uptime
+- Connection Usage
 - Threads Running
-- Slow Queries / 1h
-- Query Rate
-- Connections
+- QPS
+- Slow Query Ratio
+- SELECT / INSERT / UPDATE / DELETE throughput
+- Connections / Threads
+- Slow / Aborted Connections
+- InnoDB Buffer Pool Hit Ratio
+- Deadlocks / Row Lock Wait
+- Temporary Tables on Disk
+- MySQL Container CPU
+- CPU throttling
+- MySQL Container Memory
+- PVC Usage
 
-If the cluster does not provide the `PrometheusRule` CRD, the installer automatically disables rule creation and keeps the main MySQL deployment path available.
+### MySQL / Performance
+
+用于进一步性能分析，重点查看：
+
+- Buffer Pool 使用与脏页
+- InnoDB row operations
+- Query throughput
+- Connection 行为
+- Lock / contention
+- 临时表
+- Binlog
+- Process / InnoDB 相关性能指标
+
+---
+
+## 10. 默认告警与阈值
+
+当前单实例生产基线包含以下核心告警：
+
+| Alert | Severity | 默认条件 |
+| --- | --- | --- |
+| `MySQLExporterDown` | critical | exporter 连续 `2m` 无法被抓取 |
+| `MySQLDown` | critical | `mysql_up == 0` 持续 `2m` |
+| `MySQLConnectionsHigh` | warning | connections > `80%` 持续 `10m` |
+| `MySQLConnectionsCritical` | critical | connections > `90%` 持续 `5m` |
+| `MySQLAbortedConnectionsHigh` | warning | 10m aborted ratio > `5%`，持续 `10m` |
+| `MySQLThreadsRunningHigh` | warning | running threads > `16` 持续 `10m` |
+| `MySQLSlowQueryRatioHigh` | warning | slow query ratio > `1%` 持续 `10m` |
+| `MySQLSlowQueryRatioCritical` | critical | slow query ratio > `5%` 持续 `5m` |
+| `MySQLDeadlocksDetected` | warning | 最近 10m 出现 deadlock |
+| `MySQLRowLockWaitHigh` | warning | current row lock waits > `5` 持续 `5m` |
+| `MySQLBufferPoolHitRatioLow` | warning | 有有效读负载时 hit ratio < `99%` 持续 `15m` |
+| `MySQLBufferPoolHitRatioCritical` | critical | 有有效读负载时 hit ratio < `95%` 持续 `10m` |
+| `MySQLTmpDiskTablesHigh` | warning | 临时表数量足够时 disk tmp ratio > `25%` 持续 `15m` |
+| `MySQLPVCUsageHigh` | warning | PVC > `80%` 持续 `15m` |
+| `MySQLPVCUsageCritical` | critical | PVC > `90%` 持续 `5m` |
+
+这些阈值是统一交付 baseline。对于明确的高并发、批处理、ETL 或特殊业务，应结合历史数据再调，避免简单照搬。
+
+---
+
+## 11. 已有 MySQL 只补监控
+
+如果不希望修改已有 StatefulSet，使用独立 monitoring 包：
+
+```bash
+./mysql-monitoring-v1.6.0-amd64.run addon-install \
+  --namespace aict \
+  --addons monitoring,service-monitor \
+  --monitoring-target mysql-0.mysql.aict:3306 \
+  --mysql-password 'Admin-Password' \
+  -y
+```
+
+它会额外创建 exporter Deployment / Service / Secret / ServiceMonitor / PrometheusRule / Dashboard，不修改原 MySQL StatefulSet。
+
+如果已有管理员凭据允许建账，安装器会创建低权限 exporter 用户。
+
+---
+
+## 12. 日志
+
+默认：
+
+- error log：`/var/log/mysql/error.log`
+- slow log：`/var/log/mysql/slow.log`
+- error log 同步到容器 stderr
+- 未启用 Fluent Bit 时 slow log 同步到容器 stdout
+
+直接查看：
+
+```bash
+kubectl logs -n aict mysql-0 -c mysql --tail=200
+```
+
+如果平台已经统一采集容器 stdout/stderr，通常无需启用 Fluent Bit sidecar。
+
+确需 Pod 内独立慢日志采集链路时：
+
+```bash
+--enable-fluentbit
+```
+
+---
+
+## 13. 数据保护
+
+默认参数：
+
+```text
+backup namespace: backup-system
+primary storage: minio-primary
+schedule: 0 */6 * * *
+retention: keep-last-3
+```
+
+安装器会检查 dataprotection CRD 与 BackupStorage：
+
+- 条件满足：自动注册 `BackupAddon / BackupSource / BackupPolicy`
+- 条件不满足：给出 warning 并跳过注册，不阻断 MySQL 本体安装
+
+典型生产安装：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run install \
+  --namespace mysql-prod \
+  --storage-class ceph-rbd \
+  --storage-size 100Gi \
+  --backup-storage-name minio-primary \
+  --backup-secondary-storage-name minio-dr \
+  --backup-schedule '0 */6 * * *' \
+  --backup-retention-ref keep-last-3 \
+  --backup-notification-ref ops-alert \
+  -y
+```
+
+备份恢复执行仍属于 dataprotection controller，不由 `apps_mysql` 直接执行。
+
+---
+
+## 14. Benchmark
+
+```bash
+./mysql-benchmark-v1.6.0-amd64.run benchmark \
+  --namespace mysql-prod \
+  --mysql-host mysql-0.mysql.mysql-prod.svc.cluster.local \
+  --mysql-user root \
+  --mysql-password 'Strong-Password-Here' \
+  --benchmark-profile oltp-read-write \
+  --benchmark-threads 64 \
+  --benchmark-time 300 \
+  --benchmark-tables 8 \
+  --benchmark-table-size 100000 \
+  --report-dir ./reports \
+  -y
+```
+
+支持 profile：
+
+```text
+standard
+oltp-point-select
+oltp-read-only
+oltp-read-write
+```
+
+输出包括：
+
+- 完整 Job 日志
+- 文本报告
+- JSON 结构化报告
+
+生产调优建议先测：
+
+1. 存储 latency / IOPS
+2. `mid` profile
+3. `high` profile
+4. 再决定 MySQL runtime 参数是否需要调整
+
+---
+
+## 15. 常用运维命令
+
+### 查看资源
+
+```bash
+kubectl get sts,pod,svc,pvc -n aict
+kubectl get servicemonitor,prometheusrule -n aict
+```
+
+### 查看 MySQL 日志
+
+```bash
+kubectl logs -n aict mysql-0 -c mysql --tail=200
+```
+
+### 查看 exporter
+
+```bash
+kubectl logs -n aict mysql-0 -c mysqld-exporter --tail=200
+```
+
+### 进入 MySQL
+
+```bash
+MYSQL_PWD="$(kubectl get secret -n aict mysql-auth -o jsonpath='{.data.mysql-root-password}' | base64 -d)"
+kubectl exec -it -n aict mysql-0 -c mysql -- \
+  env MYSQL_PWD="${MYSQL_PWD}" mysql -uroot
+```
+
+### 重跑 installer
+
+Installer 采用声明式对齐思路。相同 namespace / StatefulSet name / Secret 下重跑可用于配置对齐。
+
+注意：runtime ConfigMap 通过 `subPath` 挂载，配置发生变化时 installer 会滚动重启单实例 Pod 使配置生效。
+
+---
+
+## 16. 卸载与数据保留
+
+默认卸载不删除 PVC：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run uninstall -n aict -y
+```
+
+只有明确需要删除数据时才使用：
+
+```bash
+--delete-pvc
+```
+
+生产环境执行卸载前应先确认：
+
+- 最新备份成功
+- 恢复路径已验证
+- PVC 是否需要保留
+- 是否存在依赖 MySQL 的业务
+
+---
+
+## 17. MySQL 8.0 -> 8.4 升级说明
+
+**不要把更换 image tag 当作完整数据库升级流程。**
+
+当前 v1.6.0 主要作为 MySQL 8.4.11 的新装标准基线。
+
+已有 MySQL 8.0 PVC 升级到 8.4 前至少应该完成：
+
+1. 全量备份
+2. 恢复验证
+3. MySQL Upgrade Checker
+4. schema / charset / deprecated configuration 检查
+5. 在测试环境复制数据进行升级演练
+6. 规划停机或切换窗口
+7. 升级后执行业务、数据一致性和监控验收
+
+更详细的 8.4 基线说明见：
+
+```text
+docs/MYSQL-8.4-BASELINE.md
+```
+
+---
+
+## 18. 参数速查
+
+### 安装
+
+```text
+--namespace <ns>
+--root-password <password>
+--auth-secret <name>
+--mysql-replicas 1
+--storage-class <name>
+--storage-size <size>
+--resource-profile <low|mid|high>
+--service-name <name>
+--sts-name <name>
+--mysql-slow-query-time <seconds>
+--wait-timeout <duration>
+```
+
+### 访问暴露
+
+```text
+--enable-nodeport
+--disable-nodeport
+--node-port <30000-32767>
+--nodeport-service-name <name>
+```
+
+### 监控
+
+```text
+--enable-monitoring
+--disable-monitoring
+--enable-service-monitor
+--disable-service-monitor
+--exporter-user <user>
+--exporter-password <password>
+--monitoring-target <host:port>
+```
+
+### 日志
+
+```text
+--enable-fluentbit
+--disable-fluentbit
+```
+
+### 数据保护
+
+```text
+--enable-data-protection
+--disable-data-protection
+--backup-namespace <ns>
+--backup-storage-name <name>
+--backup-secondary-storage-name <name>
+--backup-schedule <cron>
+--backup-retention-ref <name>
+--backup-notification-ref <name>
+--backup-database <name>
+```
+
+### 镜像仓库
+
+```text
+--registry <repo-prefix>
+--skip-image-prepare
+```
+
+安装包内置帮助：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run help install
+./mysql-installer-v1.6.0-amd64.run help params
+./mysql-installer-v1.6.0-amd64.run help architecture
+```
+
+---
+
+## 19. 构建离线安装包
+
+构建机需要：
+
+- Docker
+- `jq`
+- Bash
+
+示例：
+
+```bash
+./build.sh --arch amd64 --profile integrated --version v1.6.0
+./build.sh --arch arm64 --profile integrated --version v1.6.0
+./build.sh --arch all --profile all --version v1.6.0
+```
+
+CI 会验证：
+
+- installer shell syntax
+- MySQL `8.4.11` BOM
+- exporter `v0.19.0` BOM
+- amd64 / arm64 镜像可用性
+- Grafana Dashboard JSON
+- Monitoring invariants
+- checksum
+- integrated / monitoring / benchmark 六种组合构建
+
+---
+
+## 20. 生产交付建议清单
+
+正式交付前建议至少确认：
+
+- [ ] 使用 MySQL 8.4.11 LTS
+- [ ] replicas = 1，明确这是单实例方案
+- [ ] 使用可靠块存储而非临时测试 NFS
+- [ ] PVC 容量按数据增长预留
+- [ ] NodePort 默认关闭；如开启则限制来源
+- [ ] root 密码已安全保存
+- [ ] exporter 使用独立低权限账号
+- [ ] Prometheus target 为 UP
+- [ ] PrometheusRule 已加载
+- [ ] Grafana `MySQL / Overview` 与 `MySQL / Performance` 可正常打开
+- [ ] 告警阈值结合现场负载复核
+- [ ] slow query 阈值符合业务 SLA
+- [ ] BackupPolicy 正常运行
+- [ ] 至少做过一次真实恢复验证
+- [ ] 使用 `mysql-benchmark` 留存目标环境基准报告
+- [ ] 任何 MySQL runtime 参数变更都已进入代码和交付包，而不是只做现场手改
+
+---
+
+## 21. 相关文档
+
+```text
+docs/MYSQL-8.4-BASELINE.md
+docs/MONITORING-V2.zh-CN.md
+docs/ARCHITECTURE.zh-CN.md
+docs/ADDONS.zh-CN.md
+docs/TESTING.zh-CN.md
+docs/USE-CASES.zh-CN.md
+```
+
+README 作为使用入口；更细的设计、测试和历史决策放在 `docs/` 中。
