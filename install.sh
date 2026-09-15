@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-#!/usr/bin/env bash
 
 # Generated source layout:
 # - edit scripts/install/modules/*.sh
@@ -10,7 +7,7 @@ set -euo pipefail
 set -Eeuo pipefail
 
 APP_NAME="mysql"
-APP_VERSION="1.5.13"
+APP_VERSION="1.6.1"
 PACKAGE_PROFILE="${PACKAGE_PROFILE:-integrated}"
 WORKDIR="/tmp/${APP_NAME}-installer"
 IMAGE_DIR="${WORKDIR}/images"
@@ -18,7 +15,9 @@ MANIFEST_DIR="${WORKDIR}/manifests"
 
 IMAGE_JSON="${IMAGE_DIR}/image.json"
 IMAGE_INDEX="${IMAGE_DIR}/image-index.tsv"
-MYSQL_MANIFEST="${MANIFEST_DIR}/innodb-mysql.yaml"
+MYSQL_MANIFEST="${MANIFEST_DIR}/mysql-core.yaml"
+MYSQL_RUNTIME_CONFIG_MANIFEST="${MANIFEST_DIR}/mysql-runtime-config.yaml"
+MYSQL_OBSERVABILITY_MANIFEST="${MANIFEST_DIR}/mysql-observability.yaml"
 BENCHMARK_MANIFEST="${MANIFEST_DIR}/mysql-benchmark-job.yaml"
 MONITORING_ADDON_MANIFEST="${MANIFEST_DIR}/mysql-addon-monitoring.yaml"
 DATA_PROTECTION_MANIFEST="${MANIFEST_DIR}/mysql-data-protection.yaml"
@@ -27,8 +26,8 @@ REGISTRY_ADDR="${REGISTRY_ADDR:-sealos.hub:5000}"
 REGISTRY_USER="${REGISTRY_USER:-admin}"
 REGISTRY_PASS="${REGISTRY_PASS:-passw0rd}"
 REGISTRY_REPO="${REGISTRY_REPO:-${REGISTRY_ADDR}/kube4}"
-MYSQL_IMAGE="${MYSQL_IMAGE:-${REGISTRY_REPO}/mysql:8.0.45}"
-MYSQL_EXPORTER_IMAGE="${MYSQL_EXPORTER_IMAGE:-${REGISTRY_REPO}/mysqld-exporter:v0.15.1}"
+MYSQL_IMAGE="${MYSQL_IMAGE:-${REGISTRY_REPO}/mysql:8.4.11}"
+MYSQL_EXPORTER_IMAGE="${MYSQL_EXPORTER_IMAGE:-${REGISTRY_REPO}/mysqld-exporter:v0.19.0}"
 FLUENTBIT_IMAGE="${FLUENTBIT_IMAGE:-${REGISTRY_REPO}/fluent-bit:3.0.7}"
 BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-${REGISTRY_REPO}/busybox:v1}"
 SYSBENCH_IMAGE="${SYSBENCH_IMAGE:-${REGISTRY_REPO}/sysbench:1.0.20-oe2403sp1}"
@@ -38,10 +37,12 @@ HELP_TOPIC="overview"
 ADDONS=""
 NAMESPACE="aict"
 MYSQL_REPLICAS="1"
-MYSQL_ROOT_PASSWORD="passw0rd"
-STORAGE_CLASS="nfs"
-STORAGE_SIZE="10Gi"
-RESOURCE_PROFILE="mid"
+MYSQL_ROOT_PASSWORD=""
+STORAGE_CLASS=""
+STORAGE_CLASS_EXPLICIT="false"
+STORAGE_SIZE=""
+STORAGE_SIZE_EXPLICIT="false"
+RESOURCE_PROFILE="standard"
 SERVICE_NAME="mysql"
 STS_NAME="mysql"
 AUTH_SECRET="mysql-auth"
@@ -57,12 +58,18 @@ MYSQL_PASSWORD_EXPLICIT="false"
 MYSQL_AUTH_SECRET_EXPLICIT="false"
 MYSQL_PASSWORD_KEY_EXPLICIT="false"
 MYSQL_HOST_EXPLICIT="false"
+MYSQL_INNODB_BUFFER_POOL_SIZE=""
+MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT="false"
+MYSQL_LOG_SIZE_LIMIT="2Gi"
+REMOTE_ROOT_ENABLED="true"
+ROOT_REMOTE_HOST="%"
+MYSQL_NATIVE_PASSWORD_ENABLED="true"
 PROBE_CONFIGMAP="mysql-probes"
-INIT_CONFIGMAP="mysql-init-users"
 MYSQL_CONFIGMAP="mysql-config"
+INIT_CONFIGMAP="mysql-init-users"
 NODEPORT_SERVICE_NAME="mysql-nodeport"
 NODE_PORT="30306"
-NODEPORT_ENABLED="true"
+NODEPORT_ENABLED="false"
 MONITORING_ENABLED="true"
 SERVICE_MONITOR_ENABLED="true"
 PROMETHEUS_RULE_ENABLED="true"
@@ -80,7 +87,7 @@ ADDON_EXPORTER_DEPLOYMENT_NAME="mysql-exporter"
 ADDON_EXPORTER_SERVICE_NAME="mysql-exporter"
 ADDON_EXPORTER_SECRET="mysql-exporter-auth"
 ADDON_EXPORTER_USERNAME="mysqld_exporter"
-ADDON_EXPORTER_PASSWORD="exporter@passw0rd"
+ADDON_EXPORTER_PASSWORD=""
 ADDON_MONITORING_TARGET=""
 ADDON_MONITORING_TARGET_EXPLICIT="false"
 ADDON_SERVICE_MONITOR_NAME="mysql-exporter-monitor"
@@ -120,10 +127,22 @@ BENCHMARK_RAND_TYPE="uniform"
 BENCHMARK_KEEP_DATA="false"
 BENCHMARK_PROFILE="standard"
 
-MYSQL_REQUEST_CPU="${MYSQL_REQUEST_CPU:-500m}"
-MYSQL_REQUEST_MEM="${MYSQL_REQUEST_MEM:-1Gi}"
-MYSQL_LIMIT_CPU="${MYSQL_LIMIT_CPU:-1}"
-MYSQL_LIMIT_MEM="${MYSQL_LIMIT_MEM:-2Gi}"
+# MySQL main-container resources are resolved by --resource-profile. Non-empty
+# environment values remain supported as expert overrides and are not replaced
+# by the selected profile.
+MYSQL_REQUEST_CPU="${MYSQL_REQUEST_CPU:-}"
+MYSQL_REQUEST_MEM="${MYSQL_REQUEST_MEM:-}"
+MYSQL_LIMIT_CPU="${MYSQL_LIMIT_CPU:-}"
+MYSQL_LIMIT_MEM="${MYSQL_LIMIT_MEM:-}"
+MYSQL_REQUEST_CPU_EXPLICIT="false"
+MYSQL_REQUEST_MEM_EXPLICIT="false"
+MYSQL_LIMIT_CPU_EXPLICIT="false"
+MYSQL_LIMIT_MEM_EXPLICIT="false"
+[[ -n "${MYSQL_REQUEST_CPU}" ]] && MYSQL_REQUEST_CPU_EXPLICIT="true"
+[[ -n "${MYSQL_REQUEST_MEM}" ]] && MYSQL_REQUEST_MEM_EXPLICIT="true"
+[[ -n "${MYSQL_LIMIT_CPU}" ]] && MYSQL_LIMIT_CPU_EXPLICIT="true"
+[[ -n "${MYSQL_LIMIT_MEM}" ]] && MYSQL_LIMIT_MEM_EXPLICIT="true"
+
 MYSQL_EXPORTER_REQUEST_CPU="${MYSQL_EXPORTER_REQUEST_CPU:-100m}"
 MYSQL_EXPORTER_REQUEST_MEM="${MYSQL_EXPORTER_REQUEST_MEM:-128Mi}"
 MYSQL_EXPORTER_LIMIT_CPU="${MYSQL_EXPORTER_LIMIT_CPU:-200m}"
@@ -210,7 +229,7 @@ show_help_overview() {
 
 动作说明:
   install                 整体安装或对齐 MySQL 本体与内置能力
-  uninstall               卸载集成包创建的资源，默认保留 PVC
+  uninstall               卸载集成包创建的资源，默认保留 PVC 与 root Secret
   status                  查看当前资源状态
   addon-install           给已有 MySQL 补充外围监控能力
   addon-uninstall         单独移除外围监控能力
@@ -230,65 +249,11 @@ help 主题:
   examples
 
 关键说明:
-  1. apps_mysql 负责 MySQL 安装、监控、压测，以及与 dataprotection 的接入注册。
-  2. 备份恢复仍由独立数据保护系统执行，但 install 会自动注册 BackupAddon/BackupSource/BackupPolicy。
-  3. 默认日志直接进容器 stdout/stderr，便于 kubectl logs 与平台日志采集共存。
-EOF
-}
-
-
-show_help_install() {
-  local cmd="./mysql-installer-<arch>.run"
-  local resource_hint="  --resource-profile <name>         默认: mid，支持 low|mid|midd|high"
-
-  cat <<EOF
-install 仅在 integrated 包中可用，适合:
-  1. 首次安装 MySQL
-  2. 调整副本数、存储、Service 等配置后重新对齐
-  3. 一次性决定是否内嵌监控 sidecar、ServiceMonitor 和日志 sidecar
-
-常用参数:
-  -n, --namespace <ns>              默认: aict
-  --root-password <password>        默认: passw0rd
-  --auth-secret <name>              默认: mysql-auth
-  --mysql-replicas <num>            默认: 1
-  --storage-class <name>            默认: nfs
-  --storage-size <size>             默认: 10Gi
-  --service-name <name>             默认: mysql
-  --sts-name <name>                 默认: mysql
-  --nodeport-enabled true|false     默认: true
-  --enable-nodeport / --disable-nodeport
-  --enable-monitoring / --disable-monitoring
-  --enable-service-monitor / --disable-service-monitor
-  --enable-fluentbit / --disable-fluentbit
-  --enable-data-protection / --disable-data-protection
-  --backup-namespace <ns>            默认: backup-system
-  --backup-storage-name <name>       默认: minio-primary
-  --backup-secondary-storage-name <name>
-  --backup-schedule <cron>           默认: 0 */6 * * *
-  --backup-retention-ref <name>      默认: keep-last-3
-  --backup-notification-ref <name>
-  --backup-database <name>
-  --mysql-slow-query-time <seconds> 默认: 2
-  --registry <repo-prefix>          例如: harbor.example.com/kube4
-  --wait-timeout <duration>         默认: 10m
-
-说明:
-  1. install 会对 StatefulSet 与相关资源做声明式对齐，配置变化可能触发滚动更新。
-  2. 如果只是给已有 MySQL 补监控，优先使用 addon-install。
-  3. 如果集群已安装 dataprotection 且备份存储已就绪，install 会自动注册 MySQL 备份接入与默认策略。
-
-示例:
-  ${cmd} install \
-    --namespace mysql-demo \
-    --root-password 'StrongPassw0rd' \
-    --backup-storage-name minio-primary \
-    --enable-fluentbit \
-    --mysql-slow-query-time 1 \
-    -y
-
-资源档位:
-${resource_hint}
+  1. 当前 MySQL 基线为 8.4.11 LTS，单实例、单副本。
+  2. resource-profile 统一只使用 lite / standard / large，默认 standard。
+  3. NodePort 默认关闭；远程 root、监控、日志等详细交付参数请看 help install。
+  4. 默认日志进入容器 stdout/stderr，便于 kubectl logs 与平台日志采集共存。
+  5. 备份恢复由独立数据保护系统执行，apps_mysql 仅保留接入协议。
 EOF
 }
 
@@ -314,12 +279,12 @@ addon 参数:
   --mysql-host <host>               可作为 monitoring-target 的简化来源
   --mysql-port <port>               默认: 3306
   --exporter-user <user>            默认: mysqld_exporter
-  --exporter-password <password>    默认: exporter@passw0rd
+  --exporter-password <password>    不传则自动生成随机密码
 
 说明:
   1. addon-install 默认不修改 MySQL StatefulSet。
   2. logging 不作为 addon 提供；如需 sidecar，请走 integrated install。
-  3. 备份恢复已迁移到独立数据保护系统。
+  3. exporter 使用独立低权限账号，不使用 root。
 
 示例:
   ${cmd} addon-install \
@@ -380,79 +345,6 @@ EOF
 }
 
 
-show_help_params() {
-  cat <<'EOF'
-核心参数速查:
-  --namespace <ns>
-  --service-name <name>
-  --sts-name <name>
-  --auth-secret <name>
-  --root-password <password>
-  --wait-timeout <duration>
-  -y, --yes
-
-镜像与仓库:
-  --registry <repo-prefix>
-  --skip-image-prepare
-
-NodePort:
-  --nodeport-enabled true|false
-  --enable-nodeport
-  --disable-nodeport
-  --node-port <port>
-  --nodeport-service-name <name>
-
-MySQL 目标连接:
-  --mysql-host <host>
-  --mysql-port <port>
-  --mysql-user <user>
-  --mysql-password <password>
-  --mysql-auth-secret <name>
-  --mysql-password-key <key>
-
-监控:
-  --addons monitoring,service-monitor
-  --monitoring-target <host:port>
-  --exporter-user <user>
-  --exporter-password <password>
-
-安装期开关:
-  --enable-monitoring / --disable-monitoring
-  --enable-service-monitor / --disable-service-monitor
-  --enable-fluentbit / --disable-fluentbit
-  --enable-data-protection / --disable-data-protection
-  --resource-profile <name>
-  --mysql-slow-query-time <seconds>
-
-数据保护:
-  --backup-namespace <ns>
-  --backup-addon-name <name>
-  --backup-source-name <name>
-  --backup-policy-name <name>
-  --backup-auth-secret <name>
-  --backup-storage-name <name>
-  --backup-secondary-storage-name <name>
-  --backup-retention-ref <name>
-  --backup-notification-ref <name>
-  --backup-schedule <cron>
-  --backup-database <name>
-
-压测:
-  --benchmark-profile <name>
-  --benchmark-threads <num>
-  --benchmark-time <sec>
-  --benchmark-warmup-time <sec>
-  --benchmark-warmup-rows <rows>
-  --benchmark-tables <num>
-  --benchmark-table-size <rows>
-  --benchmark-db <name>
-  --benchmark-rand-type <name>
-  --benchmark-keep-data
-  --report-dir <dir>
-EOF
-}
-
-
 show_help_packages() {
   cat <<'EOF'
 当前会构建三类产物:
@@ -472,29 +364,30 @@ show_help_packages() {
 设计目标:
   1. 保留 integrated 包，继续服务离线整体交付
   2. 抽出 benchmark / monitoring，降低非目标场景的使用成本
-  3. 备份恢复改由独立数据保护系统负责，apps_mysql 不再重复承载
+  3. 备份恢复由独立数据保护系统负责，apps_mysql 不重复承载
 EOF
 }
 
 
 show_help_logging() {
   cat <<'EOF'
-日志能力现在分两层：
+日志能力分两层：
 
 默认行为:
-  1. MySQL 日志统一写到 /var/log/mysql 下的安全路径
-  2. 未开启 sidecar 时，error.log / slow.log 会被软链接到容器 stderr / stdout
-  3. 因此默认就支持 kubectl logs 查看，也方便平台 DaemonSet 统一采集
+  1. MySQL error log / slow log 写入 /var/log/mysql
+  2. error log 会进入 mysql 容器 stderr
+  3. 未启用 Fluent Bit 时 slow log 会进入 mysql 容器 stdout
+  4. /var/log/mysql 使用带 sizeLimit 的 emptyDir，默认 2Gi
 
 启用 --enable-fluentbit 后:
-  1. error.log 仍会进入 mysql 容器 stderr，kubectl logs -c mysql 仍然可看
-  2. slow log 改为写真实文件，由 fluent-bit sidecar 转发到它自己的 stdout
+  1. error log 仍进入 mysql 容器 stderr
+  2. slow log 由 fluent-bit sidecar tail 并输出
   3. 适合必须消费文件型慢日志的场景
 
 当前推荐:
   1. 已有平台 Fluent Bit/Fluentd/Vector 时，优先直接采容器 stdout/stderr
   2. 只有明确需要 Pod 内 slow log 文件时，再启用 --enable-fluentbit
-  3. monitoring addon 不负责日志，日志只在 integrated install 路径里管理
+  3. Pod 文件系统不是长期日志归档介质
 EOF
 }
 
@@ -503,65 +396,25 @@ show_help_architecture() {
   cat <<'EOF'
 能力分层:
   integrated
-    负责 MySQL 本体、StatefulSet、Service、PVC，以及内置 sidecar 对齐
+    MySQL 8.4.11 本体、StatefulSet、Service、PVC、内嵌监控与日志
   benchmark
-    负责压测能力与报告输出
+    标准化 sysbench 压测与报告输出
   monitoring
-    负责 exporter / ServiceMonitor 等外围监控能力
-
-边界调整:
-  1. apps_mysql 只保留安装、监控、压测
-  2. 备份恢复已经迁移到独立数据保护系统
-  3. 这样可以避免安装器继续膨胀，也减少其他项目复用时的负担
+    外置 exporter / ServiceMonitor / Dashboard / Alert
 
 源码结构:
   scripts/install/modules/*.sh
-    职责模块源码入口
+    安装器模块源码入口
 
   scripts/assemble-install.sh
     组装 install.sh
 
   build.sh
     根据 --profile 与 --arch 产出不同离线包
-EOF
-}
 
-
-show_help_examples() {
-  cat <<EOF
-常见示例:
-
-首次安装 MySQL：
-  ./mysql-installer-<arch>.run install \
-    --namespace mysql-demo \
-    --root-password 'StrongPassw0rd' \
-    -y
-
-首次安装并显式打开文件慢日志 sidecar：
-  ./mysql-installer-<arch>.run install \
-    --namespace mysql-demo \
-    --enable-fluentbit \
-    --mysql-slow-query-time 1 \
-    -y
-
-给已有 MySQL 补监控：
-  ./mysql-monitoring-<arch>.run addon-install \
-    --namespace mysql-demo \
-    --addons monitoring,service-monitor \
-    --monitoring-target 10.0.0.20:3306 \
-    -y
-
-独立压测：
-  ./mysql-benchmark-<arch>.run benchmark \
-    --namespace mysql-demo \
-    --mysql-host 10.0.0.20 \
-    --mysql-user root \
-    --mysql-password '<MYSQL_PASSWORD>' \
-    --benchmark-profile oltp-read-write \
-    --benchmark-threads 64 \
-    --benchmark-time 300 \
-    --report-dir ./reports \
-    -y
+交付资源规格:
+  lite / standard / large
+  三种名称是唯一正式口径，不维护第二套别名。
 EOF
 }
 
@@ -599,6 +452,243 @@ show_help() {
       die "未知 help 主题: ${HELP_TOPIC}。可用主题: overview, install, addons, benchmark, params, packages, logging, architecture, examples"
       ;;
   esac
+}
+
+# MySQL 8.4 help overrides loaded after 20-help.sh.
+
+show_help_install() {
+  local cmd="./mysql-installer-<arch>.run"
+
+  cat <<EOF
+install 仅在 integrated 包中可用，当前交付基线为 MySQL 8.4.11 LTS，单实例模式。
+
+资源规格（--resource-profile）:
+  lite      精简模式：MySQL request 500m/1Gi，limit 1C/2Gi，Buffer Pool 1G，新装 PVC 默认 20Gi
+  standard  标准模式：MySQL request 1C/4Gi，limit 2C/8Gi，Buffer Pool 5G，新装 PVC 默认 100Gi（默认）
+  large     大规格模式：MySQL request 2C/8Gi，limit 4C/16Gi，Buffer Pool 10G，新装 PVC 默认 500Gi
+
+重要说明:
+  - resource-profile 只接受 lite / standard / large，其他名称直接报错，避免交付口径分叉。
+  - 2C8G / 1C2G / 4C16G 指 MySQL 主容器 limit；request 默认约为 50%，便于 Kubernetes 调度。
+  - mysqld-exporter / Fluent Bit / initContainer 有各自的小额资源开销，不计入上述 MySQL 主容器规格。
+  - 新安装时，profile 同时给出 CPU、内存、InnoDB Buffer Pool 和 PVC 默认容量。
+  - 已有 PVC 重跑 installer 时不会因为切换 profile 自动改盘；必须显式传 --storage-size 才尝试扩容。
+  - Kubernetes PVC 不支持缩容；在线扩容要求 StorageClass.allowVolumeExpansion=true。
+  - --storage-size 与 --innodb-buffer-pool-size 优先级高于 profile 默认值。
+
+常用参数:
+  -n, --namespace <ns>              默认: aict
+  --root-password <password>        默认: 自动生成随机密码；已有 Secret/${AUTH_SECRET} 时复用
+  --auth-secret <name>              默认: mysql-auth
+  --mysql-replicas <num>            固定: 1（当前不提供伪多副本）
+  --resource-profile <name>         默认: standard；仅支持 lite|standard|large
+  --storage-class <name>            默认: nfs；生产建议显式改为块存储类
+  --storage-size <size>             覆盖 profile 的 PVC 容量，例如 200Gi
+  --innodb-buffer-pool-size <size>  覆盖 profile 的 Buffer Pool，例如 6G
+  --mysql-log-size-limit <size>     MySQL 本地日志 emptyDir 上限，默认: 2Gi
+  --service-name <name>             默认: mysql
+  --sts-name <name>                 默认: mysql
+  --enable-remote-root              默认开启；创建并幂等对齐 root@<host>
+  --disable-remote-root             删除安装器管理的远程 root
+  --root-remote-host <host>         默认: %
+  --enable-native-password          默认开启 mysql_native_password 兼容插件
+  --disable-native-password         仅在客户端全部支持 caching_sha2_password 后使用
+  --enable-nodeport                 默认关闭；确需集群外直连时显式开启
+  --node-port <port>                默认: 30306
+  --enable-monitoring / --disable-monitoring
+  --enable-service-monitor / --disable-service-monitor
+  --enable-fluentbit / --disable-fluentbit
+  --enable-data-protection / --disable-data-protection
+  --mysql-slow-query-time <seconds> 默认: 2
+  --registry <repo-prefix>          例如: harbor.example.com/kube4
+  --wait-timeout <duration>         默认: 10m
+
+默认安全/性能基线:
+  - NodePort 默认关闭；remote root 默认只通过集群网络可达
+  - root 与 exporter 密码不使用固定默认值
+  - root@localhost 保留默认 caching_sha2_password；root@% 默认用于兼容旧客户端并使用 mysql_native_password
+  - local_infile=OFF、skip_name_resolve=ON、mysqlx=0
+  - utf8mb4 / utf8mb4_0900_ai_ci，数据库与错误日志统一 UTC
+  - startupProbe 最长允许约 10 分钟启动；terminationGracePeriodSeconds=120
+  - InnoDB durability: innodb_flush_log_at_trx_commit=1、sync_binlog=1
+  - resource profile 会联动 MySQL CPU / Memory、InnoDB Buffer Pool 和新装 PVC 默认容量
+  - binlog ROW + GTID，保留 7 天
+  - performance_schema 与 slow query log 默认开启
+  - mysqld-exporter v0.19.0 使用独立低权限账号
+
+示例一：默认标准模式（2C8G / 100Gi）
+  ${cmd} install \
+    --namespace mysql-prod \
+    --storage-class ceph-rbd \
+    --root-password 'StrongPassw0rd!' \
+    --resource-profile standard \
+    -y
+
+示例二：精简模式（1C2G / 20Gi）
+  ${cmd} install \
+    --namespace mysql-lite \
+    --resource-profile lite \
+    --storage-class nfs \
+    --disable-data-protection \
+    -y
+
+示例三：大规格模式并覆盖默认磁盘
+  ${cmd} install \
+    --namespace mysql-large \
+    --resource-profile large \
+    --storage-class ceph-rbd \
+    --storage-size 1Ti \
+    --innodb-buffer-pool-size 11G \
+    -y
+
+查看自动生成的 root 密码:
+  kubectl get secret -n <namespace> mysql-auth -o jsonpath='{.data.mysql-root-password}' | base64 -d; echo
+EOF
+}
+
+
+show_help_params() {
+  cat <<'EOF'
+核心参数速查:
+  --namespace <ns>
+  --service-name <name>
+  --sts-name <name>
+  --auth-secret <name>
+  --root-password <password>        不传则首次安装自动生成
+  --enable-remote-root / --disable-remote-root
+  --root-remote-host <host>         默认: %
+  --enable-native-password / --disable-native-password
+  --wait-timeout <duration>
+  -y, --yes
+
+资源与存储:
+  --resource-profile <lite|standard|large>
+      lite      MySQL limit 1C/2Gi，request 500m/1Gi，Buffer Pool 1G，PVC 默认 20Gi
+      standard  MySQL limit 2C/8Gi，request 1C/4Gi，Buffer Pool 5G，PVC 默认 100Gi（默认）
+      large     MySQL limit 4C/16Gi，request 2C/8Gi，Buffer Pool 10G，PVC 默认 500Gi
+  --storage-class <name>            默认 nfs；生产建议 Ceph RBD / SAN / Local PV / 云盘
+  --storage-size <size>             显式覆盖 profile，例如 200Gi、1Ti
+  --innodb-buffer-pool-size <size>  显式覆盖 profile，例如 6G、12G
+  --mysql-log-size-limit <size>     默认 2Gi
+  --mysql-slow-query-time <seconds> 默认 2
+
+存储 reconcile 规则:
+  - 新装：profile 决定默认 PVC 大小。
+  - 已有 PVC + 未传 --storage-size：保留当前 PVC，不随 profile 自动扩缩容。
+  - 已有 PVC + 显式 --storage-size：installer 对 PVC 发起 resize。
+  - PVC 不允许缩容；扩容依赖 StorageClass.allowVolumeExpansion=true。
+  - StatefulSet volumeClaimTemplates 是 immutable，installer 会保留原模板容量并直接管理现有 PVC 的扩容。
+
+镜像与仓库:
+  --registry <repo-prefix>
+  --skip-image-prepare
+
+访问暴露:
+  --enable-nodeport                默认关闭
+  --disable-nodeport
+  --node-port <port>
+  --nodeport-service-name <name>
+
+监控:
+  --addons monitoring,service-monitor
+  --monitoring-target <host:port>
+  --exporter-user <user>
+  --exporter-password <password>   不传则自动生成
+  --enable-monitoring / --disable-monitoring
+  --enable-service-monitor / --disable-service-monitor
+
+数据保护:
+  --enable-data-protection / --disable-data-protection
+  --backup-namespace <ns>
+  --backup-storage-name <name>
+  --backup-secondary-storage-name <name>
+  --backup-schedule <cron>
+  --backup-retention-ref <name>
+  --backup-notification-ref <name>
+  --backup-database <name>
+EOF
+}
+
+# Resource-profile examples loaded after the base help modules.
+
+show_help_examples() {
+  cat <<'EOF'
+常见示例:
+
+1. 标准交付（默认 2C/8Gi + 100Gi PVC）：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-prod \
+    --resource-profile standard \
+    --storage-class ceph-rbd \
+    --root-password 'StrongPassw0rd' \
+    -y
+
+2. 精简模式（1C/2Gi + 20Gi PVC）：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-demo \
+    --resource-profile lite \
+    --storage-class nfs \
+    --disable-data-protection \
+    -y
+
+3. 大规格模式（4C/16Gi + 500Gi PVC）：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-large \
+    --resource-profile large \
+    --storage-class ceph-rbd \
+    -y
+
+4. 标准模式但项目要求 300Gi 数据盘：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-prod \
+    --resource-profile standard \
+    --storage-class ceph-rbd \
+    --storage-size 300Gi \
+    -y
+
+5. 已有 PVC 显式扩容到 500Gi：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-prod \
+    --resource-profile standard \
+    --storage-size 500Gi \
+    -y
+
+   注意：PVC 不支持缩容；扩容要求 StorageClass.allowVolumeExpansion=true。
+
+6. 标准规格但按压测结果调整 Buffer Pool：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-prod \
+    --resource-profile standard \
+    --innodb-buffer-pool-size 6G \
+    -y
+
+7. 首次安装并显式打开文件慢日志 sidecar：
+  ./mysql-installer-<arch>.run install \
+    --namespace mysql-demo \
+    --resource-profile lite \
+    --enable-fluentbit \
+    --mysql-slow-query-time 1 \
+    -y
+
+8. 给已有 MySQL 补监控：
+  ./mysql-monitoring-<arch>.run addon-install \
+    --namespace mysql-demo \
+    --addons monitoring,service-monitor \
+    --monitoring-target 10.0.0.20:3306 \
+    -y
+
+9. 独立压测：
+  ./mysql-benchmark-<arch>.run benchmark \
+    --namespace mysql-demo \
+    --mysql-host 10.0.0.20 \
+    --mysql-user root \
+    --mysql-password '<MYSQL_PASSWORD>' \
+    --benchmark-profile oltp-read-write \
+    --benchmark-threads 64 \
+    --benchmark-time 300 \
+    --report-dir ./reports \
+    -y
+EOF
 }
 
 package_profile_label() {
@@ -737,10 +827,39 @@ parse_args() {
         RESOURCE_PROFILE="$2"
         shift 2
         ;;
+      --innodb-buffer-pool-size)
+        MYSQL_INNODB_BUFFER_POOL_SIZE="$2"
+        MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT="true"
+        shift 2
+        ;;
+      --mysql-log-size-limit)
+        MYSQL_LOG_SIZE_LIMIT="$2"
+        shift 2
+        ;;
       --root-password)
         MYSQL_ROOT_PASSWORD="$2"
         MYSQL_ROOT_PASSWORD_EXPLICIT="true"
         shift 2
+        ;;
+      --enable-remote-root)
+        REMOTE_ROOT_ENABLED="true"
+        shift
+        ;;
+      --disable-remote-root)
+        REMOTE_ROOT_ENABLED="false"
+        shift
+        ;;
+      --root-remote-host)
+        ROOT_REMOTE_HOST="$2"
+        shift 2
+        ;;
+      --enable-native-password)
+        MYSQL_NATIVE_PASSWORD_ENABLED="true"
+        shift
+        ;;
+      --disable-native-password)
+        MYSQL_NATIVE_PASSWORD_ENABLED="false"
+        shift
         ;;
       --auth-secret)
         AUTH_SECRET="$2"
@@ -781,8 +900,8 @@ parse_args() {
       --registry)
         REGISTRY_REPO="$2"
         REGISTRY_ADDR="${2%%/*}"
-        MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.0.45"
-        MYSQL_EXPORTER_IMAGE="${REGISTRY_REPO}/mysqld-exporter:v0.15.1"
+        MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.4.11"
+        MYSQL_EXPORTER_IMAGE="${REGISTRY_REPO}/mysqld-exporter:v0.19.0"
         FLUENTBIT_IMAGE="${REGISTRY_REPO}/fluent-bit:3.0.7"
         BUSYBOX_IMAGE="${REGISTRY_REPO}/busybox:v1"
         SYSBENCH_IMAGE="${REGISTRY_REPO}/sysbench:1.0.20-oe2403sp1"
@@ -1257,6 +1376,9 @@ apply_resource_profile() {
       MYSQL_INIT_REQUEST_MEM="32Mi"
       MYSQL_INIT_LIMIT_CPU="100m"
       MYSQL_INIT_LIMIT_MEM="64Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="384M"
+      fi
       ;;
     mid|midd|middle|medium)
       RESOURCE_PROFILE="mid"
@@ -1276,6 +1398,9 @@ apply_resource_profile() {
       MYSQL_INIT_REQUEST_MEM="64Mi"
       MYSQL_INIT_LIMIT_CPU="200m"
       MYSQL_INIT_LIMIT_MEM="128Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="1G"
+      fi
       ;;
     high)
       RESOURCE_PROFILE="high"
@@ -1295,6 +1420,9 @@ apply_resource_profile() {
       MYSQL_INIT_REQUEST_MEM="128Mi"
       MYSQL_INIT_LIMIT_CPU="300m"
       MYSQL_INIT_LIMIT_MEM="256Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="2G"
+      fi
       ;;
     *)
       die "resource-profile 仅支持 low|mid|midd|high"
@@ -1316,7 +1444,16 @@ validate_inputs() {
   apply_resource_profile
 
   [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 只支持 true 或 false"
+  [[ "${REMOTE_ROOT_ENABLED}" =~ ^(true|false)$ ]] || die "remote root 开关只支持 true 或 false"
+  [[ "${MYSQL_NATIVE_PASSWORD_ENABLED}" =~ ^(true|false)$ ]] || die "mysql_native_password 开关只支持 true 或 false"
   [[ "${DATA_PROTECTION_ENABLED}" =~ ^(true|false)$ ]] || die "--enable-data-protection / --disable-data-protection only accepts boolean switches"
+  [[ -n "${MYSQL_INNODB_BUFFER_POOL_SIZE}" ]] || die "InnoDB buffer pool size 不能为空"
+  [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE}" =~ ^[1-9][0-9]*([KMGTP])?$ ]] || die "--innodb-buffer-pool-size 使用 MySQL 大小格式，例如 384M、1G、2G"
+  [[ -n "${MYSQL_LOG_SIZE_LIMIT}" ]] || die "--mysql-log-size-limit 不能为空"
+
+  if [[ "${REMOTE_ROOT_ENABLED}" == "true" ]]; then
+    [[ -n "${ROOT_REMOTE_HOST}" ]] || die "开启 remote root 时 --root-remote-host 不能为空"
+  fi
 
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
@@ -1376,10 +1513,17 @@ print_plan() {
         echo "NodePort 服务名         : ${NODEPORT_SERVICE_NAME}"
         echo "NodePort                : ${NODE_PORT}"
       fi
+      echo "远程 root               : ${REMOTE_ROOT_ENABLED}"
+      if [[ "${REMOTE_ROOT_ENABLED}" == "true" ]]; then
+        echo "root 允许来源           : ${ROOT_REMOTE_HOST}"
+      fi
+      echo "mysql_native_password   : ${MYSQL_NATIVE_PASSWORD_ENABLED}"
       echo "副本数                  : ${MYSQL_REPLICAS}"
       echo "StorageClass            : ${STORAGE_CLASS}"
       echo "Resource profile        : ${RESOURCE_PROFILE}"
+      echo "InnoDB Buffer Pool      : ${MYSQL_INNODB_BUFFER_POOL_SIZE}"
       echo "存储大小                : ${STORAGE_SIZE}"
+      echo "日志临时盘上限          : ${MYSQL_LOG_SIZE_LIMIT}"
       echo "镜像前缀                : ${REGISTRY_REPO}"
       echo "监控 exporter           : ${MONITORING_ENABLED}"
       echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
@@ -1439,6 +1583,170 @@ print_plan() {
 confirm_plan() {
   [[ "${AUTO_YES}" == "true" ]] && return 0
   print_plan
+  echo
+  echo -ne "${YELLOW}确认继续执行？[y/N]:${NC} "
+  read -r answer
+  [[ "${answer}" =~ ^[Yy]$ ]] || die "用户取消执行"
+}
+
+# Canonical MySQL delivery resource profiles. Loaded after 40-inputs-and-plan.sh.
+
+set_profile_mysql_resource_default() {
+  local value_var="$1"
+  local explicit_var="$2"
+  local default_value="$3"
+
+  if [[ "${!explicit_var}" != "true" ]]; then
+    printf -v "${value_var}" '%s' "${default_value}"
+  fi
+}
+
+
+apply_resource_profile() {
+  # Empty storage values mean "use the delivery default". A non-empty value
+  # came from an explicit installer argument and must win over profile defaults.
+  if [[ -n "${STORAGE_CLASS}" ]]; then
+    STORAGE_CLASS_EXPLICIT="true"
+  else
+    STORAGE_CLASS="nfs"
+  fi
+
+  if [[ -n "${STORAGE_SIZE}" ]]; then
+    STORAGE_SIZE_EXPLICIT="true"
+  fi
+
+  case "${RESOURCE_PROFILE,,}" in
+    lite)
+      RESOURCE_PROFILE="lite"
+      set_profile_mysql_resource_default MYSQL_REQUEST_CPU MYSQL_REQUEST_CPU_EXPLICIT "500m"
+      set_profile_mysql_resource_default MYSQL_REQUEST_MEM MYSQL_REQUEST_MEM_EXPLICIT "1Gi"
+      set_profile_mysql_resource_default MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "1"
+      set_profile_mysql_resource_default MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "2Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="50m"
+      MYSQL_EXPORTER_REQUEST_MEM="64Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="100m"
+      MYSQL_EXPORTER_LIMIT_MEM="128Mi"
+      FLUENTBIT_REQUEST_CPU="50m"
+      FLUENTBIT_REQUEST_MEM="64Mi"
+      FLUENTBIT_LIMIT_CPU="100m"
+      FLUENTBIT_LIMIT_MEM="128Mi"
+      MYSQL_INIT_REQUEST_CPU="20m"
+      MYSQL_INIT_REQUEST_MEM="32Mi"
+      MYSQL_INIT_LIMIT_CPU="100m"
+      MYSQL_INIT_LIMIT_MEM="64Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="1G"
+      fi
+      if [[ "${STORAGE_SIZE_EXPLICIT}" != "true" ]]; then
+        STORAGE_SIZE="20Gi"
+      fi
+      ;;
+    standard)
+      RESOURCE_PROFILE="standard"
+      set_profile_mysql_resource_default MYSQL_REQUEST_CPU MYSQL_REQUEST_CPU_EXPLICIT "1"
+      set_profile_mysql_resource_default MYSQL_REQUEST_MEM MYSQL_REQUEST_MEM_EXPLICIT "4Gi"
+      set_profile_mysql_resource_default MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "2"
+      set_profile_mysql_resource_default MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "8Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="100m"
+      MYSQL_EXPORTER_REQUEST_MEM="128Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="200m"
+      MYSQL_EXPORTER_LIMIT_MEM="256Mi"
+      FLUENTBIT_REQUEST_CPU="100m"
+      FLUENTBIT_REQUEST_MEM="128Mi"
+      FLUENTBIT_LIMIT_CPU="200m"
+      FLUENTBIT_LIMIT_MEM="256Mi"
+      MYSQL_INIT_REQUEST_CPU="50m"
+      MYSQL_INIT_REQUEST_MEM="64Mi"
+      MYSQL_INIT_LIMIT_CPU="200m"
+      MYSQL_INIT_LIMIT_MEM="128Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="5G"
+      fi
+      if [[ "${STORAGE_SIZE_EXPLICIT}" != "true" ]]; then
+        STORAGE_SIZE="100Gi"
+      fi
+      ;;
+    large)
+      RESOURCE_PROFILE="large"
+      set_profile_mysql_resource_default MYSQL_REQUEST_CPU MYSQL_REQUEST_CPU_EXPLICIT "2"
+      set_profile_mysql_resource_default MYSQL_REQUEST_MEM MYSQL_REQUEST_MEM_EXPLICIT "8Gi"
+      set_profile_mysql_resource_default MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "4"
+      set_profile_mysql_resource_default MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "16Gi"
+      MYSQL_EXPORTER_REQUEST_CPU="200m"
+      MYSQL_EXPORTER_REQUEST_MEM="256Mi"
+      MYSQL_EXPORTER_LIMIT_CPU="500m"
+      MYSQL_EXPORTER_LIMIT_MEM="512Mi"
+      FLUENTBIT_REQUEST_CPU="200m"
+      FLUENTBIT_REQUEST_MEM="256Mi"
+      FLUENTBIT_LIMIT_CPU="500m"
+      FLUENTBIT_LIMIT_MEM="512Mi"
+      MYSQL_INIT_REQUEST_CPU="100m"
+      MYSQL_INIT_REQUEST_MEM="128Mi"
+      MYSQL_INIT_LIMIT_CPU="300m"
+      MYSQL_INIT_LIMIT_MEM="256Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="10G"
+      fi
+      if [[ "${STORAGE_SIZE_EXPLICIT}" != "true" ]]; then
+        STORAGE_SIZE="500Gi"
+      fi
+      ;;
+    *)
+      die "resource-profile 仅支持 lite|standard|large"
+      ;;
+  esac
+
+  if [[ "${ACTION}" != "install" ]]; then
+    return 0
+  fi
+
+  local pvc_name existing_pvc_size existing_storage_class
+  pvc_name="data-${STS_NAME}-0"
+  existing_pvc_size="$(kubectl get pvc -n "${NAMESPACE}" "${pvc_name}" -o 'jsonpath={.spec.resources.requests.storage}' 2>/dev/null || true)"
+  existing_storage_class="$(kubectl get pvc -n "${NAMESPACE}" "${pvc_name}" -o 'jsonpath={.spec.storageClassName}' 2>/dev/null || true)"
+
+  # Existing persistent data must not be silently resized just because the
+  # installer default/profile changed. Explicit --storage-size is required.
+  if [[ -n "${existing_pvc_size}" && "${STORAGE_SIZE_EXPLICIT}" != "true" && "${existing_pvc_size}" != "${STORAGE_SIZE}" ]]; then
+    warn "检测到现有 PVC/${pvc_name}=${existing_pvc_size}；不会因 resource-profile 自动改盘，继续保留现有容量。需要扩容请显式传 --storage-size。"
+    STORAGE_SIZE="${existing_pvc_size}"
+  fi
+
+  # A bound PVC cannot be migrated to another StorageClass in-place. Preserve
+  # the existing class unless the caller explicitly asked for an incompatible
+  # change, in which case fail early with a useful message.
+  if [[ -n "${existing_storage_class}" ]]; then
+    if [[ "${STORAGE_CLASS_EXPLICIT}" == "true" && "${STORAGE_CLASS}" != "${existing_storage_class}" ]]; then
+      die "PVC/${pvc_name} 已绑定 StorageClass=${existing_storage_class}，不能通过 reconcile 原地改为 ${STORAGE_CLASS}。请走数据迁移/新 PVC 流程。"
+    fi
+    if [[ "${STORAGE_CLASS_EXPLICIT}" != "true" ]]; then
+      STORAGE_CLASS="${existing_storage_class}"
+    fi
+  fi
+}
+
+# Resource-plan confirmation details loaded after profile resolution.
+
+confirm_plan() {
+  [[ "${AUTO_YES}" == "true" ]] && return 0
+
+  print_plan
+
+  if [[ "${ACTION}" == "install" ]]; then
+    echo
+    echo "资源规格摘要:"
+    echo "  MySQL request          : ${MYSQL_REQUEST_CPU} CPU / ${MYSQL_REQUEST_MEM} memory"
+    echo "  MySQL limit            : ${MYSQL_LIMIT_CPU} CPU / ${MYSQL_LIMIT_MEM} memory"
+    echo "  InnoDB Buffer Pool     : ${MYSQL_INNODB_BUFFER_POOL_SIZE}"
+    echo "  PVC request            : ${STORAGE_SIZE}"
+    echo "  StorageClass           : ${STORAGE_CLASS}"
+    if [[ "${STORAGE_SIZE_EXPLICIT}" == "true" ]]; then
+      echo "  PVC size source        : --storage-size 显式覆盖"
+    else
+      echo "  PVC size source        : resource-profile / 已有 PVC 保留值"
+    fi
+  fi
+
   echo
   echo -ne "${YELLOW}确认继续执行？[y/N]:${NC} "
   read -r answer
@@ -1887,6 +2195,186 @@ apply_benchmark_job() {
   render_manifest "${BENCHMARK_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
+# MySQL 8.4 delivery rendering extensions loaded after 50-render-and-apply.sh.
+
+render_feature_blocks() {
+  local file_path="$1"
+  local nodeport_enabled="${NODEPORT_ENABLED}"
+  local stdout_logging_enabled="false"
+  local backup_notification_enabled="false"
+  local backup_database_enabled="false"
+  local backup_secondary_storage_enabled="false"
+  local backup_retention_enabled="false"
+  local native_password_enabled="${MYSQL_NATIVE_PASSWORD_ENABLED}"
+
+  if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
+    stdout_logging_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_NOTIFICATION_REF}" ]]; then
+    backup_notification_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_DATABASE}" ]]; then
+    backup_database_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_SECONDARY_STORAGE_NAME}" ]]; then
+    backup_secondary_storage_enabled="true"
+  fi
+
+  if [[ -n "${BACKUP_RETENTION_REF}" ]]; then
+    backup_retention_enabled="true"
+  fi
+
+  cat "${file_path}" \
+    | render_optional_block "FEATURE_MONITORING" "${MONITORING_ENABLED}" \
+    | render_optional_block "FEATURE_SERVICE_MONITOR" "${SERVICE_MONITOR_ENABLED}" \
+    | render_optional_block "FEATURE_PROMETHEUS_RULE" "${PROMETHEUS_RULE_ENABLED}" \
+    | render_optional_block "FEATURE_FLUENTBIT" "${FLUENTBIT_ENABLED}" \
+    | render_optional_block "FEATURE_STDOUT_LOGGING" "${stdout_logging_enabled}" \
+    | render_optional_block "FEATURE_NATIVE_PASSWORD" "${native_password_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_NOTIFICATION" "${backup_notification_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_DATABASE" "${backup_database_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_SECONDARY_STORAGE" "${backup_secondary_storage_enabled}" \
+    | render_optional_block "FEATURE_BACKUP_RETENTION" "${backup_retention_enabled}" \
+    | render_optional_block "FEATURE_NODEPORT" "${nodeport_enabled}"
+}
+
+
+strip_embedded_exporter_secret() {
+  awk '
+    function emit_doc(   i) {
+      if (line_count == 0) return
+      if (!drop_doc) {
+        if (printed_doc) print "---"
+        for (i = 1; i <= line_count; i++) print lines[i]
+        printed_doc = 1
+      }
+      delete lines
+      line_count = 0
+      drop_doc = 0
+    }
+    /^---[[:space:]]*$/ { emit_doc(); next }
+    {
+      line_count++
+      lines[line_count] = $0
+      if ($0 ~ /^[[:space:]]*name:[[:space:]]*__ADDON_EXPORTER_SECRET__[[:space:]]*$/) drop_doc = 1
+    }
+    END { emit_doc() }
+  '
+}
+
+
+render_manifest() {
+  local file_path="$1"
+
+  if [[ "${file_path}" == "${MYSQL_MANIFEST}" ]]; then
+    render_feature_blocks "${file_path}" \
+      | strip_embedded_exporter_secret \
+      | template_replace \
+      | sed \
+          -e "s#__MYSQL_INNODB_BUFFER_POOL_SIZE__#${MYSQL_INNODB_BUFFER_POOL_SIZE}#g" \
+          -e "s#__MYSQL_LOG_SIZE_LIMIT__#${MYSQL_LOG_SIZE_LIMIT}#g"
+    return 0
+  fi
+
+  render_feature_blocks "${file_path}" \
+    | template_replace \
+    | sed \
+        -e "s#__MYSQL_INNODB_BUFFER_POOL_SIZE__#${MYSQL_INNODB_BUFFER_POOL_SIZE}#g" \
+        -e "s#__MYSQL_LOG_SIZE_LIMIT__#${MYSQL_LOG_SIZE_LIMIT}#g"
+}
+
+
+apply_mysql_observability_manifests() {
+  if [[ "${MONITORING_ENABLED}" != "true" && "${SERVICE_MONITOR_ENABLED}" != "true" && "${PROMETHEUS_RULE_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  require_manifest_file "${MYSQL_OBSERVABILITY_MANIFEST}"
+  render_manifest "${MYSQL_OBSERVABILITY_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+}
+
+
+cleanup_disabled_optional_resources() {
+  # Remove stale objects when a feature is disabled on a later reconcile.
+  if [[ "${NODEPORT_ENABLED}" != "true" ]]; then
+    kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${NODEPORT_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${MONITORING_ENABLED}" != "true" ]]; then
+    kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${METRICS_SERVICE_NAME}" >/dev/null 2>&1 || true
+    kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${ADDON_EXPORTER_SECRET}" >/dev/null 2>&1 || true
+    kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${GRAFANA_DASHBOARD_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${SERVICE_MONITOR_ENABLED}" != "true" ]] && cluster_supports_service_monitor; then
+    kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found "${SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${PROMETHEUS_RULE_ENABLED}" != "true" ]] && cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
+    kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${FLUENTBIT_CONFIGMAP}" >/dev/null 2>&1 || true
+  fi
+
+  # v1.6.0 no longer mounts init SQL or fixed-password health users.
+  kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found mysql-init-users >/dev/null 2>&1 || true
+
+  delete_legacy_backup_resources
+}
+
+# StatefulSet PVC reconciliation extensions. Loaded after rendering modules.
+
+apply_mysql_manifests() {
+  require_manifest_file "${MYSQL_MANIFEST}"
+
+  local desired_storage_size="${STORAGE_SIZE}"
+  local existing_template_size=""
+  existing_template_size="$(kubectl get statefulset -n "${NAMESPACE}" "${STS_NAME}" \
+    -o 'jsonpath={.spec.volumeClaimTemplates[0].spec.resources.requests.storage}' 2>/dev/null || true)"
+
+  if [[ -n "${existing_template_size}" ]]; then
+    # volumeClaimTemplates is immutable on an existing StatefulSet. Render the
+    # existing template size and handle an explicitly requested PVC expansion
+    # against the PVC object itself after the StatefulSet reconcile succeeds.
+    STORAGE_SIZE="${existing_template_size}"
+  fi
+
+  render_manifest "${MYSQL_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
+  STORAGE_SIZE="${desired_storage_size}"
+
+  if [[ -z "${existing_template_size}" || "${STORAGE_SIZE_EXPLICIT}" != "true" ]]; then
+    return 0
+  fi
+
+  local pvc_name current_pvc_size
+  pvc_name="data-${STS_NAME}-0"
+  current_pvc_size="$(kubectl get pvc -n "${NAMESPACE}" "${pvc_name}" \
+    -o 'jsonpath={.spec.resources.requests.storage}' 2>/dev/null || true)"
+
+  if [[ -z "${current_pvc_size}" ]]; then
+    warn "未找到 PVC/${pvc_name}，跳过显式存储扩容"
+    return 0
+  fi
+
+  if [[ "${current_pvc_size}" == "${desired_storage_size}" ]]; then
+    return 0
+  fi
+
+  log "请求扩容 PVC/${pvc_name}: ${current_pvc_size} -> ${desired_storage_size}"
+  if ! kubectl patch pvc -n "${NAMESPACE}" "${pvc_name}" --type=merge \
+    -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"${desired_storage_size}\"}}}}" >/dev/null; then
+    die "PVC/${pvc_name} 调整到 ${desired_storage_size} 失败。Kubernetes PVC 不支持缩容；扩容还要求 StorageClass.allowVolumeExpansion=true。"
+  fi
+
+  success "PVC/${pvc_name} 已提交扩容请求: ${desired_storage_size}"
+}
+
 wait_for_statefulset_ready() {
   log "等待 StatefulSet/${STS_NAME} 就绪"
   kubectl rollout status "statefulset/${STS_NAME}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}"
@@ -2205,6 +2693,201 @@ preflight_mysql_connection() {
 }
 
 
+# SQL literal escaping override loaded after 60-runtime.sh.
+
+sql_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/''/g"
+}
+
+# Runtime/bootstrap extensions loaded after 60-runtime.sh.
+
+validate_single_instance_mode() {
+  if [[ "${ACTION}" == "install" && "${MYSQL_REPLICAS}" != "1" ]]; then
+    die "apps_mysql v1.6.0 仅支持单实例交付；--mysql-replicas 必须为 1。多副本 StatefulSet 不等于 MySQL HA。"
+  fi
+
+  if [[ -z "${ADDON_EXPORTER_PASSWORD}" ]]; then
+    ADDON_EXPORTER_PASSWORD="$(generate_mysql_password)"
+  fi
+}
+
+
+generate_mysql_password() {
+  if [[ -r /dev/urandom ]]; then
+    od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+    return 0
+  fi
+  printf 'mysql-%s-%s' "$(date +%s)" "$RANDOM$RANDOM"
+}
+
+
+ensure_install_root_password() {
+  [[ "${ACTION}" == "install" ]] || return 0
+
+  local existing="" existing_workload="false"
+  existing="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' 2>/dev/null | base64 --decode || true)"
+  if kubectl get statefulset -n "${NAMESPACE}" "${STS_NAME}" >/dev/null 2>&1; then
+    existing_workload="true"
+  fi
+
+  if [[ "${MYSQL_ROOT_PASSWORD_EXPLICIT}" == "true" && -n "${MYSQL_ROOT_PASSWORD}" ]]; then
+    if [[ -n "${existing}" && "${existing}" != "${MYSQL_ROOT_PASSWORD}" ]]; then
+      die "Secret/${AUTH_SECRET} 已存在且密码与 --root-password 不一致。install 不负责在线轮换 root 密码，请先按变更流程轮换数据库密码与 Secret 后再 reconcile。"
+    fi
+    return 0
+  fi
+
+  if [[ -n "${existing}" ]]; then
+    MYSQL_ROOT_PASSWORD="${existing}"
+    log "复用 Secret/${AUTH_SECRET} 中已有 root 密码"
+    return 0
+  fi
+
+  if [[ "${existing_workload}" == "true" ]]; then
+    die "检测到现有 StatefulSet/${STS_NAME}，但 Secret/${AUTH_SECRET} 中没有可用 root 密码。为避免生成错误密码导致无法 reconcile，请显式传入现有数据库的 --root-password。"
+  fi
+
+  MYSQL_ROOT_PASSWORD="$(generate_mysql_password)"
+  warn "未显式提供 --root-password，已自动生成随机 root 密码"
+}
+
+
+sync_install_root_secret() {
+  [[ "${ACTION}" == "install" ]] || return 0
+
+  kubectl create secret generic "${AUTH_SECRET}" \
+    -n "${NAMESPACE}" \
+    --from-literal="mysql-root-password=${MYSQL_ROOT_PASSWORD}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  success "Secret/${AUTH_SECRET} 已对齐"
+}
+
+
+sync_embedded_exporter_secret() {
+  [[ "${MONITORING_ENABLED}" == "true" ]] || return 0
+
+  local escaped_user escaped_password config
+  escaped_user="${ADDON_EXPORTER_USERNAME//\\/\\\\}"
+  escaped_user="${escaped_user//\"/\\\"}"
+  escaped_password="${ADDON_EXPORTER_PASSWORD//\\/\\\\}"
+  escaped_password="${escaped_password//\"/\\\"}"
+  config="$(printf '[client]\nuser="%s"\npassword="%s"\nhost=127.0.0.1\nport=3306\n' "${escaped_user}" "${escaped_password}")"
+
+  kubectl create secret generic "${ADDON_EXPORTER_SECRET}" \
+    -n "${NAMESPACE}" \
+    --from-literal=".my.cnf=${config}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  success "Secret/${ADDON_EXPORTER_SECRET} 已对齐"
+}
+
+
+apply_mysql_runtime_config() {
+  require_manifest_file "${MYSQL_RUNTIME_CONFIG_MANIFEST}"
+  section "Apply MySQL 8.4 Runtime Configuration"
+  render_manifest "${MYSQL_RUNTIME_CONFIG_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f - >/dev/null
+  success "MySQL runtime ConfigMap 已对齐"
+}
+
+
+cleanup_legacy_local_users() {
+  local pod_name root_password
+  pod_name="$(mysql_pod_name)"
+  root_password="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' | base64 --decode)"
+
+  kubectl exec -n "${NAMESPACE}" "${pod_name}" -- env MYSQL_PWD="${root_password}" mysql -uroot -Nse \
+    "DROP USER IF EXISTS 'localroot'@'localhost'; DROP USER IF EXISTS 'mysqlhealthchecker'@'localhost'; FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+}
+
+
+prune_remote_root_users() {
+  local pod_name root_password keep_host escaped_keep_host query drop_sql
+  pod_name="$(mysql_pod_name)"
+  root_password="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' | base64 --decode)"
+  keep_host="${1:-}"
+  escaped_keep_host="$(sql_escape "${keep_host}")"
+
+  if [[ -n "${keep_host}" ]]; then
+    query="SELECT CONCAT(\"DROP USER IF EXISTS 'root'@\", QUOTE(host), \";\") FROM mysql.user WHERE user='root' AND host <> 'localhost' AND host <> '${escaped_keep_host}';"
+  else
+    query="SELECT CONCAT(\"DROP USER IF EXISTS 'root'@\", QUOTE(host), \";\") FROM mysql.user WHERE user='root' AND host <> 'localhost';"
+  fi
+
+  drop_sql="$(kubectl exec -n "${NAMESPACE}" "${pod_name}" -- env MYSQL_PWD="${root_password}" mysql -uroot -Nse "${query}" 2>/dev/null || true)"
+  if [[ -n "${drop_sql}" ]]; then
+    kubectl exec -n "${NAMESPACE}" "${pod_name}" -- env MYSQL_PWD="${root_password}" mysql -uroot -Nse "${drop_sql}" >/dev/null
+  fi
+}
+
+
+reconcile_remote_root_user() {
+  local pod_name root_password root_host escaped_password escaped_host sql
+  pod_name="$(mysql_pod_name)"
+  root_password="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' | base64 --decode)"
+  root_host="${ROOT_REMOTE_HOST}"
+  escaped_password="$(sql_escape "${root_password}")"
+  escaped_host="$(sql_escape "${root_host}")"
+
+  if [[ "${REMOTE_ROOT_ENABLED}" == "true" ]]; then
+    if [[ "${MYSQL_NATIVE_PASSWORD_ENABLED}" == "true" ]]; then
+      sql="CREATE USER IF NOT EXISTS 'root'@'${escaped_host}' IDENTIFIED WITH mysql_native_password BY '${escaped_password}'; ALTER USER 'root'@'${escaped_host}' IDENTIFIED WITH mysql_native_password BY '${escaped_password}'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'${escaped_host}' WITH GRANT OPTION; FLUSH PRIVILEGES;"
+    else
+      sql="CREATE USER IF NOT EXISTS 'root'@'${escaped_host}' IDENTIFIED BY '${escaped_password}'; ALTER USER 'root'@'${escaped_host}' IDENTIFIED BY '${escaped_password}'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'${escaped_host}' WITH GRANT OPTION; FLUSH PRIVILEGES;"
+    fi
+
+    log "对齐远程 root 账号 root@${root_host}"
+    kubectl exec -n "${NAMESPACE}" "${pod_name}" -- env MYSQL_PWD="${root_password}" mysql -uroot -Nse "${sql}" >/dev/null
+    prune_remote_root_users "${root_host}"
+    success "远程 root 账号已按交付策略对齐"
+    return 0
+  fi
+
+  log "关闭安装器管理的远程 root 账号"
+  prune_remote_root_users ""
+  success "远程 root 已关闭，仅保留 root@localhost"
+}
+
+
+ensure_embedded_exporter_user() {
+  [[ "${MONITORING_ENABLED}" == "true" ]] || return 0
+
+  local pod_name root_password exporter_user exporter_password sql
+  pod_name="$(mysql_pod_name)"
+  root_password="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' | base64 --decode)"
+  exporter_user="$(sql_escape "${ADDON_EXPORTER_USERNAME}")"
+  exporter_password="$(sql_escape "${ADDON_EXPORTER_PASSWORD}")"
+
+  sql="CREATE USER IF NOT EXISTS '${exporter_user}'@'%' IDENTIFIED BY '${exporter_password}'; ALTER USER '${exporter_user}'@'%' IDENTIFIED BY '${exporter_password}' WITH MAX_USER_CONNECTIONS 3; GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO '${exporter_user}'@'%'; FLUSH PRIVILEGES;"
+
+  log "确保内嵌 mysqld-exporter 低权限账号存在"
+  kubectl exec -n "${NAMESPACE}" "${pod_name}" -- env MYSQL_PWD="${root_password}" mysql -uroot -Nse "${sql}" >/dev/null
+  success "mysqld-exporter 监控账号已就绪"
+}
+
+
+wait_for_mysql_ready() {
+  local pod_name
+  pod_name="$(mysql_pod_name)"
+
+  log "等待 Pod/${pod_name} Ready"
+  kubectl wait --for=condition=ready "pod/${pod_name}" -n "${NAMESPACE}" --timeout="${WAIT_TIMEOUT}" >/dev/null
+
+  log "等待 MySQL 接受连接"
+  local retries=120 attempt root_password
+  for (( attempt=1; attempt<=retries; attempt++ )); do
+    root_password="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' 2>/dev/null | base64 --decode || true)"
+    if [[ -n "${root_password}" ]] && kubectl exec -n "${NAMESPACE}" "${pod_name}" -- env MYSQL_PWD="${root_password}" mysqladmin -uroot ping >/dev/null 2>&1; then
+      cleanup_legacy_local_users
+      reconcile_remote_root_user
+      ensure_embedded_exporter_user
+      success "MySQL 已就绪"
+      return 0
+    fi
+    sleep 5
+  done
+
+  die "MySQL 在超时时间内未就绪"
+}
+
 monitoring_bootstrap_auth_available() {
   if [[ -n "${MYSQL_PASSWORD}" ]]; then
     return 0
@@ -2515,6 +3198,88 @@ install_addons() {
   fi
 }
 
+# MySQL 8.4 lifecycle overrides. Loaded after 70-lifecycle-actions.sh.
+
+install_app() {
+  extract_payload
+  prepare_images
+  ensure_namespace
+  ensure_install_root_password
+  sync_install_root_secret
+  sync_embedded_exporter_secret
+
+  if [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && ! cluster_supports_service_monitor; then
+    warn "ServiceMonitor CRD is missing; skipping ServiceMonitor resources"
+    SERVICE_MONITOR_ENABLED="false"
+  fi
+
+  if [[ "${PROMETHEUS_RULE_ENABLED}" == "true" ]] && ! cluster_supports_prometheus_rule; then
+    warn "PrometheusRule CRD is missing; skipping PrometheusRule resources"
+    PROMETHEUS_RULE_ENABLED="false"
+  fi
+
+  local existing_statefulset="false"
+  if kubectl get statefulset -n "${NAMESPACE}" "${STS_NAME}" >/dev/null 2>&1; then
+    existing_statefulset="true"
+  fi
+
+  section "Install Or Reconcile MySQL 8.4 LTS"
+  # Runtime ConfigMaps and auth Secrets must exist before a new StatefulSet pod is created.
+  apply_mysql_runtime_config
+  apply_mysql_manifests
+  apply_mysql_observability_manifests
+  cleanup_disabled_optional_resources
+
+  # ConfigMap is mounted through subPath. Existing pods need one deterministic restart.
+  if [[ "${existing_statefulset}" == "true" ]]; then
+    kubectl rollout restart "statefulset/${STS_NAME}" -n "${NAMESPACE}" >/dev/null
+    log "MySQL runtime 配置已更新，触发单实例滚动重启"
+  fi
+
+  wait_for_statefulset_ready
+  wait_for_mysql_ready
+  install_data_protection_integration
+  success "MySQL 8.4.11 LTS install/reconcile completed"
+}
+
+
+uninstall_app() {
+  extract_payload
+  require_namespace_exists
+  section "Uninstall MySQL 8.4 LTS"
+
+  # Explicit deletion keeps uninstall independent from the current install-time feature flags.
+  kubectl delete statefulset -n "${NAMESPACE}" --ignore-not-found "${STS_NAME}" >/dev/null 2>&1 || true
+  kubectl delete service -n "${NAMESPACE}" --ignore-not-found \
+    "${SERVICE_NAME}" "${NODEPORT_SERVICE_NAME}" "${METRICS_SERVICE_NAME}" >/dev/null 2>&1 || true
+  kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found \
+    "${MYSQL_CONFIGMAP}" "${PROBE_CONFIGMAP}" "${FLUENTBIT_CONFIGMAP}" "${GRAFANA_DASHBOARD_NAME}" mysql-init-users >/dev/null 2>&1 || true
+  kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${ADDON_EXPORTER_SECRET}" >/dev/null 2>&1 || true
+
+  delete_external_monitoring_resources
+  delete_legacy_backup_resources
+  uninstall_data_protection_integration
+
+  if cluster_supports_service_monitor; then
+    kubectl delete servicemonitor -n "${NAMESPACE}" --ignore-not-found \
+      "${SERVICE_MONITOR_NAME}" "${ADDON_SERVICE_MONITOR_NAME}" >/dev/null 2>&1 || true
+  fi
+  if cluster_supports_prometheus_rule; then
+    kubectl delete prometheusrule -n "${NAMESPACE}" --ignore-not-found \
+      "${PROMETHEUS_RULE_NAME}" "${ADDON_PROMETHEUS_RULE_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  kubectl delete jobs -n "${NAMESPACE}" --ignore-not-found mysql-benchmark >/dev/null 2>&1 || true
+
+  if [[ "${DELETE_PVC}" == "true" ]]; then
+    delete_pvcs_if_requested
+    kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${AUTH_SECRET}" >/dev/null 2>&1 || true
+    success "MySQL workload、PVC 与 root Secret 已删除"
+  else
+    success "MySQL workload 已卸载；PVC 与 Secret/${AUTH_SECRET} 已保留，便于后续恢复同一数据目录"
+  fi
+}
+
 legacy_backup_resource_selector() {
   echo "app.kubernetes.io/component=backup"
 }
@@ -2683,6 +3448,7 @@ main() {
   prompt_missing_values
   validate_environment
   validate_inputs
+  validate_single_instance_mode
   prepare_runtime_auth_secret
 
   if [[ "${ACTION}" != "status" && "${ACTION}" != "addon-status" ]]; then
