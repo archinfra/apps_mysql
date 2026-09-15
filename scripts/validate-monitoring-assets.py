@@ -20,6 +20,8 @@ EXPORTER_MANIFESTS = [
 RUNTIME_CONFIG = ROOT / "manifests" / "mysql-runtime-config.yaml"
 CORE_MANIFEST = ROOT / "manifests" / "mysql-core.yaml"
 BOOTSTRAP_MODULE = ROOT / "scripts" / "install" / "modules" / "65-monitoring-bootstrap.sh"
+LIFECYCLE_MODULE = ROOT / "scripts" / "install" / "modules" / "75-mysql84-install.sh"
+RENDER_MODULE = ROOT / "scripts" / "install" / "modules" / "55-delivery-render.sh"
 ARGS_MODULE = ROOT / "scripts" / "install" / "modules" / "30-args.sh"
 
 
@@ -56,6 +58,13 @@ def extract_json_blocks(path: pathlib.Path) -> dict[str, str]:
     return blocks
 
 
+def require_text(path: pathlib.Path, required_items: tuple[str, ...], label: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    for required in required_items:
+        if required not in text:
+            raise SystemExit(f"{path}: missing {label}: {required}")
+
+
 def main() -> int:
     total = 0
 
@@ -82,60 +91,103 @@ def main() -> int:
                 raise SystemExit(f"{manifest}:{name}: invalid JSON: {exc}") from exc
             total += 1
 
-    runtime = RUNTIME_CONFIG.read_text(encoding="utf-8")
-    required_runtime_settings = (
-        "local_infile=OFF",
-        "skip_name_resolve=ON",
-        "mysqlx=0",
-        "mysql_native_password=ON",
-        "character_set_server=utf8mb4",
-        "collation_server=utf8mb4_0900_ai_ci",
-        "default_time_zone='+00:00'",
-        "log_timestamps=UTC",
-        "innodb_flush_log_at_trx_commit=1",
-        "sync_binlog=1",
-        "innodb_buffer_pool_size=__MYSQL_INNODB_BUFFER_POOL_SIZE__",
-        "innodb_redo_log_capacity=1G",
-        "performance_schema=ON",
-        "binlog_format=ROW",
+    require_text(
+        RUNTIME_CONFIG,
+        (
+            "local_infile=OFF",
+            "skip_name_resolve=ON",
+            "mysqlx=0",
+            "mysql_native_password=ON",
+            "character_set_server=utf8mb4",
+            "collation_server=utf8mb4_0900_ai_ci",
+            "default_time_zone='+00:00'",
+            "log_timestamps=UTC",
+            "innodb_flush_log_at_trx_commit=1",
+            "sync_binlog=1",
+            "innodb_buffer_pool_size=__MYSQL_INNODB_BUFFER_POOL_SIZE__",
+            "innodb_redo_log_capacity=1G",
+            "performance_schema=ON",
+            "binlog_format=ROW",
+        ),
+        "required runtime setting",
     )
-    for setting in required_runtime_settings:
-        if setting not in runtime:
-            raise SystemExit(f"{RUNTIME_CONFIG}: missing required setting {setting}")
 
-    core = CORE_MANIFEST.read_text(encoding="utf-8")
-    for required in (
-        "startupProbe:",
-        "failureThreshold: 60",
-        "terminationGracePeriodSeconds: 120",
-        "automountServiceAccountToken: false",
-        "sizeLimit: __MYSQL_LOG_SIZE_LIMIT__",
-    ):
-        if required not in core:
-            raise SystemExit(f"{CORE_MANIFEST}: missing delivery hardening setting {required}")
+    require_text(
+        CORE_MANIFEST,
+        (
+            "startupProbe:",
+            "failureThreshold: 60",
+            "terminationGracePeriodSeconds: 120",
+            "automountServiceAccountToken: false",
+            "enableServiceLinks: false",
+            "sizeLimit: __MYSQL_LOG_SIZE_LIMIT__",
+        ),
+        "delivery hardening setting",
+    )
 
     all_manifest_text = "\n".join(
         p.read_text(encoding="utf-8") for p in (ROOT / "manifests").glob("*.yaml")
     )
-    for legacy in ("mysqlhealthchecker", "localroot", "health@passw0rd", "local@paasw0rd"):
+    for legacy in ("mysqlhealthchecker", "localroot", "health@passw0rd", "local@paasw0rd", "local-infile=1"):
         if legacy in all_manifest_text:
-            raise SystemExit(f"manifests: legacy static-password artifact remains: {legacy}")
+            raise SystemExit(f"manifests: legacy artifact remains: {legacy}")
+    if (ROOT / "manifests" / "innodb-mysql.yaml").exists():
+        raise SystemExit("manifests/innodb-mysql.yaml: legacy combined manifest must be removed")
 
-    bootstrap = BOOTSTRAP_MODULE.read_text(encoding="utf-8")
-    for required in (
-        "reconcile_remote_root_user",
-        "IDENTIFIED WITH mysql_native_password",
-        "GRANT ALL PRIVILEGES ON *.*",
-        "DROP USER IF EXISTS 'root'@'%'",
-    ):
-        if required not in bootstrap:
-            raise SystemExit(f"{BOOTSTRAP_MODULE}: missing remote-root reconciliation logic: {required}")
+    require_text(
+        BOOTSTRAP_MODULE,
+        (
+            "reconcile_remote_root_user",
+            "prune_remote_root_users",
+            "host <> 'localhost'",
+            "IDENTIFIED WITH mysql_native_password",
+            "GRANT ALL PRIVILEGES ON *.*",
+            "sync_install_root_secret",
+            "sync_embedded_exporter_secret",
+            "检测到现有 StatefulSet/${STS_NAME}",
+        ),
+        "remote-root/credential reconciliation logic",
+    )
+
+    require_text(
+        LIFECYCLE_MODULE,
+        (
+            "sync_install_root_secret",
+            "sync_embedded_exporter_secret",
+            "apply_mysql_runtime_config",
+            "apply_mysql_observability_manifests",
+            'if [[ "${DELETE_PVC}" == "true" ]]',
+            'Secret/${AUTH_SECRET} 已保留',
+        ),
+        "safe lifecycle behavior",
+    )
+
+    require_text(
+        RENDER_MODULE,
+        (
+            "strip_embedded_exporter_secret",
+            "__MYSQL_INNODB_BUFFER_POOL_SIZE__",
+            "__MYSQL_LOG_SIZE_LIMIT__",
+        ),
+        "safe rendering behavior",
+    )
 
     args = ARGS_MODULE.read_text(encoding="utf-8")
     if "mysql:8.0.46" in args or "mysql:8.0.45" in args:
         raise SystemExit(f"{ARGS_MODULE}: obsolete MySQL 8.0 registry rewrite remains")
     if 'MYSQL_IMAGE="${REGISTRY_REPO}/mysql:8.4.11"' not in args:
         raise SystemExit(f"{ARGS_MODULE}: --registry must resolve MySQL 8.4.11")
+    for flag in (
+        "--enable-remote-root",
+        "--disable-remote-root",
+        "--root-remote-host",
+        "--enable-native-password",
+        "--disable-native-password",
+        "--innodb-buffer-pool-size",
+        "--mysql-log-size-limit",
+    ):
+        if flag not in args:
+            raise SystemExit(f"{ARGS_MODULE}: missing delivery flag {flag}")
 
     images = json.loads((ROOT / "images" / "image.json").read_text(encoding="utf-8"))
     for arch in ("amd64", "arm64"):
@@ -147,7 +199,7 @@ def main() -> int:
 
     print(
         f"validated {total} Grafana dashboard JSON block(s), MySQL 8.4 hardening, "
-        "remote-root reconciliation and image BOM"
+        "remote-root reconciliation, lifecycle safety and image BOM"
     )
     return 0
 
