@@ -45,8 +45,43 @@ render_feature_blocks() {
 }
 
 
+strip_embedded_exporter_secret() {
+  awk '
+    function emit_doc(   i) {
+      if (line_count == 0) return
+      if (!drop_doc) {
+        if (printed_doc) print "---"
+        for (i = 1; i <= line_count; i++) print lines[i]
+        printed_doc = 1
+      }
+      delete lines
+      line_count = 0
+      drop_doc = 0
+    }
+    /^---[[:space:]]*$/ { emit_doc(); next }
+    {
+      line_count++
+      lines[line_count] = $0
+      if ($0 ~ /^[[:space:]]*name:[[:space:]]*__ADDON_EXPORTER_SECRET__[[:space:]]*$/) drop_doc = 1
+    }
+    END { emit_doc() }
+  '
+}
+
+
 render_manifest() {
   local file_path="$1"
+
+  if [[ "${file_path}" == "${MYSQL_MANIFEST}" ]]; then
+    render_feature_blocks "${file_path}" \
+      | strip_embedded_exporter_secret \
+      | template_replace \
+      | sed \
+          -e "s#__MYSQL_INNODB_BUFFER_POOL_SIZE__#${MYSQL_INNODB_BUFFER_POOL_SIZE}#g" \
+          -e "s#__MYSQL_LOG_SIZE_LIMIT__#${MYSQL_LOG_SIZE_LIMIT}#g"
+    return 0
+  fi
+
   render_feature_blocks "${file_path}" \
     | template_replace \
     | sed \
