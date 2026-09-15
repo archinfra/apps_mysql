@@ -5,6 +5,7 @@ install_app() {
   prepare_images
   ensure_namespace
   ensure_install_root_password
+  sync_install_root_secret
 
   if [[ "${SERVICE_MONITOR_ENABLED}" == "true" ]] && ! cluster_supports_service_monitor; then
     warn "ServiceMonitor CRD is missing; skipping ServiceMonitor resources"
