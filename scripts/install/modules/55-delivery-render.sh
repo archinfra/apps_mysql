@@ -56,12 +56,21 @@ render_manifest() {
 
 
 apply_mysql_observability_manifests() {
+  if [[ "${MONITORING_ENABLED}" != "true" && "${SERVICE_MONITOR_ENABLED}" != "true" && "${PROMETHEUS_RULE_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
   require_manifest_file "${MYSQL_OBSERVABILITY_MANIFEST}"
   render_manifest "${MYSQL_OBSERVABILITY_MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 }
 
 
 cleanup_disabled_optional_resources() {
+  # Remove stale objects when a feature is disabled on a later reconcile.
+  if [[ "${NODEPORT_ENABLED}" != "true" ]]; then
+    kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${NODEPORT_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+
   if [[ "${MONITORING_ENABLED}" != "true" ]]; then
     kubectl delete service -n "${NAMESPACE}" --ignore-not-found "${METRICS_SERVICE_NAME}" >/dev/null 2>&1 || true
     kubectl delete secret -n "${NAMESPACE}" --ignore-not-found "${ADDON_EXPORTER_SECRET}" >/dev/null 2>&1 || true
@@ -80,6 +89,9 @@ cleanup_disabled_optional_resources() {
   if [[ "${FLUENTBIT_ENABLED}" != "true" ]]; then
     kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found "${FLUENTBIT_CONFIGMAP}" >/dev/null 2>&1 || true
   fi
+
+  # v1.6.0 no longer mounts init SQL or fixed-password health users.
+  kubectl delete configmap -n "${NAMESPACE}" --ignore-not-found mysql-init-users >/dev/null 2>&1 || true
 
   delete_legacy_backup_resources
 }
