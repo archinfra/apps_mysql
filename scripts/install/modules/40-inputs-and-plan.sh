@@ -67,6 +67,9 @@ apply_resource_profile() {
       MYSQL_INIT_REQUEST_MEM="32Mi"
       MYSQL_INIT_LIMIT_CPU="100m"
       MYSQL_INIT_LIMIT_MEM="64Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="384M"
+      fi
       ;;
     mid|midd|middle|medium)
       RESOURCE_PROFILE="mid"
@@ -86,6 +89,9 @@ apply_resource_profile() {
       MYSQL_INIT_REQUEST_MEM="64Mi"
       MYSQL_INIT_LIMIT_CPU="200m"
       MYSQL_INIT_LIMIT_MEM="128Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="1G"
+      fi
       ;;
     high)
       RESOURCE_PROFILE="high"
@@ -105,6 +111,9 @@ apply_resource_profile() {
       MYSQL_INIT_REQUEST_MEM="128Mi"
       MYSQL_INIT_LIMIT_CPU="300m"
       MYSQL_INIT_LIMIT_MEM="256Mi"
+      if [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE_EXPLICIT}" != "true" ]]; then
+        MYSQL_INNODB_BUFFER_POOL_SIZE="2G"
+      fi
       ;;
     *)
       die "resource-profile 仅支持 low|mid|midd|high"
@@ -126,7 +135,16 @@ validate_inputs() {
   apply_resource_profile
 
   [[ "${NODEPORT_ENABLED}" =~ ^(true|false)$ ]] || die "--nodeport-enabled 只支持 true 或 false"
+  [[ "${REMOTE_ROOT_ENABLED}" =~ ^(true|false)$ ]] || die "remote root 开关只支持 true 或 false"
+  [[ "${MYSQL_NATIVE_PASSWORD_ENABLED}" =~ ^(true|false)$ ]] || die "mysql_native_password 开关只支持 true 或 false"
   [[ "${DATA_PROTECTION_ENABLED}" =~ ^(true|false)$ ]] || die "--enable-data-protection / --disable-data-protection only accepts boolean switches"
+  [[ -n "${MYSQL_INNODB_BUFFER_POOL_SIZE}" ]] || die "InnoDB buffer pool size 不能为空"
+  [[ "${MYSQL_INNODB_BUFFER_POOL_SIZE}" =~ ^[1-9][0-9]*([KMGTP])?$ ]] || die "--innodb-buffer-pool-size 使用 MySQL 大小格式，例如 384M、1G、2G"
+  [[ -n "${MYSQL_LOG_SIZE_LIMIT}" ]] || die "--mysql-log-size-limit 不能为空"
+
+  if [[ "${REMOTE_ROOT_ENABLED}" == "true" ]]; then
+    [[ -n "${ROOT_REMOTE_HOST}" ]] || die "开启 remote root 时 --root-remote-host 不能为空"
+  fi
 
   if [[ "${ACTION}" != "addon-status" ]]; then
     [[ "${MYSQL_REPLICAS}" =~ ^[0-9]+$ ]] || die "mysql 副本数必须是数字"
@@ -186,10 +204,17 @@ print_plan() {
         echo "NodePort 服务名         : ${NODEPORT_SERVICE_NAME}"
         echo "NodePort                : ${NODE_PORT}"
       fi
+      echo "远程 root               : ${REMOTE_ROOT_ENABLED}"
+      if [[ "${REMOTE_ROOT_ENABLED}" == "true" ]]; then
+        echo "root 允许来源           : ${ROOT_REMOTE_HOST}"
+      fi
+      echo "mysql_native_password   : ${MYSQL_NATIVE_PASSWORD_ENABLED}"
       echo "副本数                  : ${MYSQL_REPLICAS}"
       echo "StorageClass            : ${STORAGE_CLASS}"
       echo "Resource profile        : ${RESOURCE_PROFILE}"
+      echo "InnoDB Buffer Pool      : ${MYSQL_INNODB_BUFFER_POOL_SIZE}"
       echo "存储大小                : ${STORAGE_SIZE}"
+      echo "日志临时盘上限          : ${MYSQL_LOG_SIZE_LIMIT}"
       echo "镜像前缀                : ${REGISTRY_REPO}"
       echo "监控 exporter           : ${MONITORING_ENABLED}"
       echo "ServiceMonitor          : ${SERVICE_MONITOR_ENABLED}"
