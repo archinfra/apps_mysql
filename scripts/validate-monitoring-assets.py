@@ -20,6 +20,7 @@ EXPORTER_MANIFESTS = [
 RUNTIME_CONFIG = ROOT / "manifests" / "mysql-runtime-config.yaml"
 CORE_MANIFEST = ROOT / "manifests" / "mysql-core.yaml"
 HEADER_MODULE = ROOT / "scripts" / "install" / "modules" / "00-header.sh"
+BASE_HELP_MODULE = ROOT / "scripts" / "install" / "modules" / "20-help.sh"
 HELP_MODULE = ROOT / "scripts" / "install" / "modules" / "22-help-mysql84.sh"
 RESOURCE_PROFILE_MODULE = ROOT / "scripts" / "install" / "modules" / "45-resource-profiles.sh"
 STORAGE_RECONCILE_MODULE = ROOT / "scripts" / "install" / "modules" / "57-storage-reconcile.sh"
@@ -27,6 +28,8 @@ BOOTSTRAP_MODULE = ROOT / "scripts" / "install" / "modules" / "65-monitoring-boo
 LIFECYCLE_MODULE = ROOT / "scripts" / "install" / "modules" / "75-mysql84-install.sh"
 RENDER_MODULE = ROOT / "scripts" / "install" / "modules" / "55-delivery-render.sh"
 ARGS_MODULE = ROOT / "scripts" / "install" / "modules" / "30-args.sh"
+README = ROOT / "README.md"
+BASELINE_DOC = ROOT / "docs" / "MYSQL-8.4-BASELINE.md"
 
 
 def extract_json_blocks(path: pathlib.Path) -> dict[str, str]:
@@ -67,6 +70,45 @@ def require_text(path: pathlib.Path, required_items: tuple[str, ...], label: str
     for required in required_items:
         if required not in text:
             raise SystemExit(f"{path}: missing {label}: {required}")
+
+
+def reject_legacy_resource_profile_aliases() -> None:
+    """Keep one delivery vocabulary: lite / standard / large only."""
+    profile_source = RESOURCE_PROFILE_MODULE.read_text(encoding="utf-8")
+    for legacy_case in (
+        "lite|small",
+        "compact|low",
+        "standard|mid",
+        "midd|middle",
+        "medium)",
+        "large|high",
+    ):
+        if legacy_case in profile_source:
+            raise SystemExit(
+                f"{RESOURCE_PROFILE_MODULE}: legacy resource-profile alias remains: {legacy_case}"
+            )
+
+    docs_and_help = {
+        BASE_HELP_MODULE: BASE_HELP_MODULE.read_text(encoding="utf-8"),
+        HELP_MODULE: HELP_MODULE.read_text(encoding="utf-8"),
+        README: README.read_text(encoding="utf-8"),
+        BASELINE_DOC: BASELINE_DOC.read_text(encoding="utf-8"),
+    }
+    forbidden_phrases = (
+        "low -> lite",
+        "low=lite",
+        "mid / midd",
+        "mid/midd",
+        "high -> large",
+        "high=large",
+        "支持 low|mid",
+        "兼容别名",
+        "兼容旧参数",
+    )
+    for path, text in docs_and_help.items():
+        for phrase in forbidden_phrases:
+            if phrase in text:
+                raise SystemExit(f"{path}: legacy resource-profile terminology remains: {phrase}")
 
 
 def main() -> int:
@@ -158,28 +200,31 @@ def main() -> int:
     require_text(
         RESOURCE_PROFILE_MODULE,
         (
+            "lite)",
             'RESOURCE_PROFILE="lite"',
             'MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "1"',
             'MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "2Gi"',
             'MYSQL_INNODB_BUFFER_POOL_SIZE="1G"',
             'STORAGE_SIZE="20Gi"',
+            "standard)",
             'RESOURCE_PROFILE="standard"',
             'MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "2"',
             'MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "8Gi"',
             'MYSQL_INNODB_BUFFER_POOL_SIZE="5G"',
             'STORAGE_SIZE="100Gi"',
+            "large)",
             'RESOURCE_PROFILE="large"',
             'MYSQL_LIMIT_CPU MYSQL_LIMIT_CPU_EXPLICIT "4"',
             'MYSQL_LIMIT_MEM MYSQL_LIMIT_MEM_EXPLICIT "16Gi"',
             'MYSQL_INNODB_BUFFER_POOL_SIZE="10G"',
             'STORAGE_SIZE="500Gi"',
-            "low->lite",
-            "high->large",
+            "resource-profile 仅支持 lite|standard|large",
             "不会因 resource-profile 自动改盘",
             "不能通过 reconcile 原地改为",
         ),
         "canonical resource profile invariant",
     )
+    reject_legacy_resource_profile_aliases()
 
     require_text(
         STORAGE_RECONCILE_MODULE,
@@ -204,6 +249,7 @@ def main() -> int:
             "PVC 默认 100Gi",
             "PVC 默认 20Gi",
             "PVC 默认 500Gi",
+            "只接受 lite / standard / large",
         ),
         "resource profile help",
     )
@@ -276,7 +322,7 @@ def main() -> int:
 
     print(
         f"validated {total} Grafana dashboard JSON block(s), MySQL 8.4 hardening, "
-        "resource profiles, storage reconcile, lifecycle safety and image BOM"
+        "canonical resource profiles, storage reconcile, lifecycle safety and image BOM"
     )
     return 0
 
