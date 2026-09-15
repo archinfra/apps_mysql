@@ -17,7 +17,7 @@ Multiple StatefulSet replicas are not treated as MySQL HA. Replication, failover
 
 ## Delivery resource profiles
 
-The installer exposes three canonical delivery profiles through `--resource-profile`:
+The installer exposes exactly three delivery profiles through `--resource-profile`:
 
 | profile | purpose | MySQL request | MySQL limit | default `innodb_buffer_pool_size` | new-install PVC |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -27,13 +27,7 @@ The installer exposes three canonical delivery profiles through `--resource-prof
 
 The canonical default is `standard`.
 
-Compatibility aliases remain accepted:
-
-```text
-low                 -> lite
-mid/midd/middle/medium -> standard
-high                -> large
-```
+No alternate or legacy profile names are accepted. Keeping one vocabulary avoids different meanings in installer commands, delivery documents and acceptance records.
 
 The CPU/memory number associated with each profile refers to the MySQL main-container limit. Requests are intentionally lower to leave scheduler flexibility. Exporter, optional Fluent Bit and initContainer resources are additional small overheads.
 
