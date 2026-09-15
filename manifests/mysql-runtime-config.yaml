@@ -13,19 +13,6 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: __INIT_CONFIGMAP__
-data:
-  init-users.sql: |
-    SET sql_log_bin=0;
-    CREATE USER IF NOT EXISTS '__ADDON_EXPORTER_USERNAME__'@'%' IDENTIFIED BY '__ADDON_EXPORTER_PASSWORD__' WITH MAX_USER_CONNECTIONS 3;
-    ALTER USER '__ADDON_EXPORTER_USERNAME__'@'%' IDENTIFIED BY '__ADDON_EXPORTER_PASSWORD__' WITH MAX_USER_CONNECTIONS 3;
-    GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO '__ADDON_EXPORTER_USERNAME__'@'%';
-    FLUSH PRIVILEGES;
-    SET sql_log_bin=1;
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
   name: __MYSQL_CONFIGMAP__
 data:
   my.cnf: |
@@ -39,12 +26,22 @@ data:
     max_connections=300
     back_log=128
     thread_cache_size=64
+#__FEATURE_NATIVE_PASSWORD_START__
+    # Temporary compatibility switch for legacy MySQL clients. Deprecated in MySQL 8.4.
+    mysql_native_password=ON
+#__FEATURE_NATIVE_PASSWORD_END__
+
+    # Explicit delivery-wide character set and timezone contract.
+    character_set_server=utf8mb4
+    collation_server=utf8mb4_0900_ai_ci
+    default_time_zone='+00:00'
+    log_timestamps=UTC
 
     # Durability first. These defaults are suitable for a single-instance production baseline.
     default_storage_engine=InnoDB
     innodb_flush_log_at_trx_commit=1
     sync_binlog=1
-    innodb_buffer_pool_size=512M
+    innodb_buffer_pool_size=__MYSQL_INNODB_BUFFER_POOL_SIZE__
     innodb_log_buffer_size=64M
     innodb_redo_log_capacity=1G
     innodb_file_per_table=ON
@@ -64,7 +61,7 @@ data:
     long_query_time=__MYSQL_SLOW_QUERY_TIME__
     log_queries_not_using_indexes=OFF
 
-    # Keep binlog for backup/PITR integration and operational visibility.
+    # Keep binlog for future backup/PITR integration and operational visibility.
     log_bin=mycluster
     binlog_format=ROW
     binlog_expire_logs_seconds=604800
