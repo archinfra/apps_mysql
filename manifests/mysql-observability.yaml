@@ -1,0 +1,285 @@
+#__FEATURE_SERVICE_MONITOR_START__
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: __SERVICE_MONITOR_NAME__
+  labels:
+    app: __APP_NAME__
+    monitoring.archinfra.io/stack: default
+spec:
+  namespaceSelector:
+    matchNames:
+      - __NAMESPACE__
+  selector:
+    matchLabels:
+      app: __APP_NAME__
+      metrics: "enabled"
+  endpoints:
+    - port: metrics
+      interval: __SERVICE_MONITOR_INTERVAL__
+      scrapeTimeout: __SERVICE_MONITOR_SCRAPE_TIMEOUT__
+      path: /metrics
+#__FEATURE_SERVICE_MONITOR_END__
+---
+#__FEATURE_PROMETHEUS_RULE_START__
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: __PROMETHEUS_RULE_NAME__
+  labels:
+    app: __APP_NAME__
+    monitoring.archinfra.io/stack: default
+spec:
+  groups:
+    - name: __APP_NAME__-availability
+      rules:
+        - alert: MySQLExporterDown
+          expr: |
+            max(up{namespace="__NAMESPACE__",service="__METRICS_SERVICE_NAME__"}) == 0
+            or absent(up{namespace="__NAMESPACE__",service="__METRICS_SERVICE_NAME__"})
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: MySQL exporter is unavailable
+            description: MySQL exporter for __APP_NAME__ in namespace __NAMESPACE__ has not been scraped successfully for 2 minutes.
+        - alert: MySQLDown
+          expr: max(mysql_up{namespace="__NAMESPACE__"}) == 0
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: MySQL is unavailable
+            description: mysqld-exporter cannot connect to MySQL __APP_NAME__ in namespace __NAMESPACE__ for 2 minutes.
+
+    - name: __APP_NAME__-connections
+      rules:
+        - alert: MySQLConnectionsHigh
+          expr: |
+            max(mysql_global_status_threads_connected{namespace="__NAMESPACE__"})
+            /
+            clamp_min(max(mysql_global_variables_max_connections{namespace="__NAMESPACE__"}), 1)
+            * 100 > 80
+          for: 10m
+          labels:
+            severity: warning
+            category: saturation
+          annotations:
+            summary: MySQL connection usage is high
+            description: MySQL __APP_NAME__ is using more than 80% of max_connections for 10 minutes.
+        - alert: MySQLConnectionsCritical
+          expr: |
+            max(mysql_global_status_threads_connected{namespace="__NAMESPACE__"})
+            /
+            clamp_min(max(mysql_global_variables_max_connections{namespace="__NAMESPACE__"}), 1)
+            * 100 > 90
+          for: 5m
+          labels:
+            severity: critical
+            category: saturation
+          annotations:
+            summary: MySQL connection usage is critical
+            description: MySQL __APP_NAME__ is using more than 90% of max_connections for 5 minutes.
+        - alert: MySQLAbortedConnectionsHigh
+          expr: |
+            increase(mysql_global_status_aborted_connects{namespace="__NAMESPACE__"}[10m])
+            /
+            clamp_min(increase(mysql_global_status_connections{namespace="__NAMESPACE__"}[10m]), 1)
+            * 100 > 5
+          for: 10m
+          labels:
+            severity: warning
+            category: connections
+          annotations:
+            summary: MySQL aborted connection ratio is high
+            description: More than 5% of MySQL connection attempts have been aborted during the last 10 minutes.
+        - alert: MySQLThreadsRunningHigh
+          expr: max(mysql_global_status_threads_running{namespace="__NAMESPACE__"}) > 16
+          for: 10m
+          labels:
+            severity: warning
+            category: saturation
+          annotations:
+            summary: MySQL has many running threads
+            description: MySQL __APP_NAME__ has more than 16 concurrently running threads for 10 minutes.
+
+    - name: __APP_NAME__-queries
+      rules:
+        - alert: MySQLSlowQueryRatioHigh
+          expr: |
+            increase(mysql_global_status_slow_queries{namespace="__NAMESPACE__"}[10m])
+            /
+            clamp_min(increase(mysql_global_status_questions{namespace="__NAMESPACE__"}[10m]), 1)
+            * 100 > 1
+          for: 10m
+          labels:
+            severity: warning
+            category: performance
+          annotations:
+            summary: MySQL slow query ratio is high
+            description: Slow queries exceed 1% of questions for 10 minutes on MySQL __APP_NAME__.
+        - alert: MySQLSlowQueryRatioCritical
+          expr: |
+            increase(mysql_global_status_slow_queries{namespace="__NAMESPACE__"}[5m])
+            /
+            clamp_min(increase(mysql_global_status_questions{namespace="__NAMESPACE__"}[5m]), 1)
+            * 100 > 5
+          for: 5m
+          labels:
+            severity: critical
+            category: performance
+          annotations:
+            summary: MySQL slow query ratio is critical
+            description: Slow queries exceed 5% of questions for 5 minutes on MySQL __APP_NAME__.
+        - alert: MySQLDeadlocksDetected
+          expr: increase(mysql_global_status_innodb_deadlocks{namespace="__NAMESPACE__"}[10m]) > 0
+          labels:
+            severity: warning
+            category: contention
+          annotations:
+            summary: MySQL deadlock detected
+            description: MySQL __APP_NAME__ has reported one or more InnoDB deadlocks in the last 10 minutes.
+        - alert: MySQLRowLockWaitHigh
+          expr: max(mysql_global_status_innodb_row_lock_current_waits{namespace="__NAMESPACE__"}) > 5
+          for: 5m
+          labels:
+            severity: warning
+            category: contention
+          annotations:
+            summary: MySQL row lock waits are high
+            description: MySQL __APP_NAME__ has more than 5 current InnoDB row lock waits for 5 minutes.
+        - alert: MySQLBufferPoolHitRatioLow
+          expr: |
+            (1 - increase(mysql_global_status_innodb_buffer_pool_reads{namespace="__NAMESPACE__"}[15m]) / clamp_min(increase(mysql_global_status_innodb_buffer_pool_read_requests{namespace="__NAMESPACE__"}[15m]), 1)) < 0.99
+            and increase(mysql_global_status_innodb_buffer_pool_read_requests{namespace="__NAMESPACE__"}[15m]) > 1000
+          for: 15m
+          labels:
+            severity: warning
+            category: performance
+          annotations:
+            summary: MySQL InnoDB buffer pool hit ratio is low
+            description: InnoDB buffer pool hit ratio is below 99% under meaningful read load for 15 minutes.
+        - alert: MySQLBufferPoolHitRatioCritical
+          expr: |
+            (1 - increase(mysql_global_status_innodb_buffer_pool_reads{namespace="__NAMESPACE__"}[10m]) / clamp_min(increase(mysql_global_status_innodb_buffer_pool_read_requests{namespace="__NAMESPACE__"}[10m]), 1)) < 0.95
+            and increase(mysql_global_status_innodb_buffer_pool_read_requests{namespace="__NAMESPACE__"}[10m]) > 1000
+          for: 10m
+          labels:
+            severity: critical
+            category: performance
+          annotations:
+            summary: MySQL InnoDB buffer pool hit ratio is critically low
+            description: InnoDB buffer pool hit ratio is below 95% under meaningful read load for 10 minutes.
+        - alert: MySQLTmpDiskTablesHigh
+          expr: |
+            increase(mysql_global_status_created_tmp_disk_tables{namespace="__NAMESPACE__"}[15m])
+            /
+            clamp_min(increase(mysql_global_status_created_tmp_tables{namespace="__NAMESPACE__"}[15m]), 1)
+            * 100 > 25
+            and increase(mysql_global_status_created_tmp_tables{namespace="__NAMESPACE__"}[15m]) > 100
+          for: 15m
+          labels:
+            severity: warning
+            category: performance
+          annotations:
+            summary: MySQL temporary tables are spilling to disk
+            description: More than 25% of temporary tables have been created on disk for 15 minutes.
+
+    - name: __APP_NAME__-storage
+      rules:
+        - alert: MySQLPVCUsageHigh
+          expr: |
+            kubelet_volume_stats_used_bytes{namespace="__NAMESPACE__",persistentvolumeclaim="data-__STS_NAME__-0"}
+            /
+            clamp_min(kubelet_volume_stats_capacity_bytes{namespace="__NAMESPACE__",persistentvolumeclaim="data-__STS_NAME__-0"}, 1)
+            * 100 > 80
+          for: 15m
+          labels:
+            severity: warning
+            category: storage
+          annotations:
+            summary: MySQL PVC usage is high
+            description: MySQL PVC data-__STS_NAME__-0 is above 80% usage for 15 minutes.
+        - alert: MySQLPVCUsageCritical
+          expr: |
+            kubelet_volume_stats_used_bytes{namespace="__NAMESPACE__",persistentvolumeclaim="data-__STS_NAME__-0"}
+            /
+            clamp_min(kubelet_volume_stats_capacity_bytes{namespace="__NAMESPACE__",persistentvolumeclaim="data-__STS_NAME__-0"}, 1)
+            * 100 > 90
+          for: 5m
+          labels:
+            severity: critical
+            category: storage
+          annotations:
+            summary: MySQL PVC usage is critical
+            description: MySQL PVC data-__STS_NAME__-0 is above 90% usage for 5 minutes.
+#__FEATURE_PROMETHEUS_RULE_END__
+---
+#__FEATURE_MONITORING_START__
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: __GRAFANA_DASHBOARD_NAME__
+  labels:
+    app: __APP_NAME__
+    grafana_dashboard: "1"
+    monitoring.archinfra.io/stack: default
+  annotations:
+    grafana_folder: Middleware/MySQL
+data:
+  mysql-overview.json: |-
+    {
+      "annotations":{"list":[]},
+      "editable":true,
+      "panels":[
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":0,"y":0},"targets":[{"expr":"max(mysql_up{namespace=\"__NAMESPACE__\"})","refId":"A"}],"title":"MySQL Up","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":4,"y":0},"targets":[{"expr":"max(mysql_global_status_uptime{namespace=\"__NAMESPACE__\"})","refId":"A"}],"fieldConfig":{"defaults":{"unit":"s"}},"title":"Uptime","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":8,"y":0},"targets":[{"expr":"max(mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"}) / clamp_min(max(mysql_global_variables_max_connections{namespace=\"__NAMESPACE__\"}),1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Connection Usage","type":"gauge"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":12,"y":0},"targets":[{"expr":"max(mysql_global_status_threads_running{namespace=\"__NAMESPACE__\"})","refId":"A"}],"title":"Threads Running","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":16,"y":0},"targets":[{"expr":"sum(rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m]))","refId":"A"}],"fieldConfig":{"defaults":{"unit":"ops"}},"title":"QPS","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":4,"w":4,"x":20,"y":0},"targets":[{"expr":"increase(mysql_global_status_slow_queries{namespace=\"__NAMESPACE__\"}[10m]) / clamp_min(increase(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[10m]),1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Slow Query Ratio / 10m","type":"stat"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":8,"x":0,"y":4},"targets":[{"expr":"rate(mysql_global_status_questions{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"questions/s","refId":"A"},{"expr":"rate(mysql_global_status_com_select{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"select/s","refId":"B"},{"expr":"rate(mysql_global_status_com_insert{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"insert/s","refId":"C"},{"expr":"rate(mysql_global_status_com_update{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"update/s","refId":"D"},{"expr":"rate(mysql_global_status_com_delete{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"delete/s","refId":"E"}],"title":"Query Throughput","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":8,"x":8,"y":4},"targets":[{"expr":"mysql_global_status_threads_connected{namespace=\"__NAMESPACE__\"}","legendFormat":"connected","refId":"A"},{"expr":"mysql_global_status_threads_running{namespace=\"__NAMESPACE__\"}","legendFormat":"running","refId":"B"},{"expr":"mysql_global_variables_max_connections{namespace=\"__NAMESPACE__\"}","legendFormat":"max","refId":"C"}],"title":"Connections & Threads","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":8,"x":16,"y":4},"targets":[{"expr":"increase(mysql_global_status_slow_queries{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"slow queries / 5m","refId":"A"},{"expr":"increase(mysql_global_status_aborted_connects{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"aborted connects / 5m","refId":"B"}],"title":"Slow & Aborted","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":0,"y":12},"targets":[{"expr":"(1 - increase(mysql_global_status_innodb_buffer_pool_reads{namespace=\"__NAMESPACE__\"}[15m]) / clamp_min(increase(mysql_global_status_innodb_buffer_pool_read_requests{namespace=\"__NAMESPACE__\"}[15m]),1)) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"InnoDB Buffer Pool Hit Ratio","type":"gauge"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":8,"y":12},"targets":[{"expr":"increase(mysql_global_status_innodb_deadlocks{namespace=\"__NAMESPACE__\"}[10m])","legendFormat":"deadlocks / 10m","refId":"A"},{"expr":"mysql_global_status_innodb_row_lock_current_waits{namespace=\"__NAMESPACE__\"}","legendFormat":"current lock waits","refId":"B"}],"title":"InnoDB Contention","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":16,"y":12},"targets":[{"expr":"increase(mysql_global_status_created_tmp_disk_tables{namespace=\"__NAMESPACE__\"}[15m]) / clamp_min(increase(mysql_global_status_created_tmp_tables{namespace=\"__NAMESPACE__\"}[15m]),1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Temporary Tables on Disk","type":"gauge"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":0,"y":19},"targets":[{"expr":"rate(container_cpu_usage_seconds_total{namespace=\"__NAMESPACE__\",pod=\"__STS_NAME__-0\",container=\"mysql\"}[5m])","legendFormat":"CPU cores","refId":"A"},{"expr":"rate(container_cpu_cfs_throttled_seconds_total{namespace=\"__NAMESPACE__\",pod=\"__STS_NAME__-0\",container=\"mysql\"}[5m])","legendFormat":"throttled seconds/s","refId":"B"}],"title":"MySQL Container CPU","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":8,"y":19},"targets":[{"expr":"container_memory_working_set_bytes{namespace=\"__NAMESPACE__\",pod=\"__STS_NAME__-0\",container=\"mysql\"}","legendFormat":"working set","refId":"A"}],"fieldConfig":{"defaults":{"unit":"bytes"}},"title":"MySQL Container Memory","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":16,"y":19},"targets":[{"expr":"kubelet_volume_stats_used_bytes{namespace=\"__NAMESPACE__\",persistentvolumeclaim=\"data-__STS_NAME__-0\"} / clamp_min(kubelet_volume_stats_capacity_bytes{namespace=\"__NAMESPACE__\",persistentvolumeclaim=\"data-__STS_NAME__-0\"},1) * 100","refId":"A"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"PVC Usage","type":"gauge"}
+      ],
+      "refresh":"30s",
+      "schemaVersion":39,
+      "tags":["archinfra","mysql","overview"],
+      "time":{"from":"now-6h","to":"now"},
+      "title":"MySQL / Overview",
+      "uid":"archinfra-mysql-overview-v2",
+      "version":3
+    }
+
+  mysql-performance.json: |-
+    {
+      "annotations":{"list":[]},
+      "editable":true,
+      "panels":[
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":0,"y":0},"targets":[{"expr":"mysql_global_status_innodb_buffer_pool_pages_data{namespace=\"__NAMESPACE__\"} / clamp_min(mysql_global_status_innodb_buffer_pool_pages_total{namespace=\"__NAMESPACE__\"},1) * 100","legendFormat":"used","refId":"A"},{"expr":"mysql_global_status_innodb_buffer_pool_pages_dirty{namespace=\"__NAMESPACE__\"} / clamp_min(mysql_global_status_innodb_buffer_pool_pages_total{namespace=\"__NAMESPACE__\"},1) * 100","legendFormat":"dirty","refId":"B"}],"fieldConfig":{"defaults":{"unit":"percent"}},"title":"Buffer Pool Pages","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":8,"y":0},"targets":[{"expr":"rate(mysql_global_status_innodb_buffer_pool_read_requests{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"logical reads/s","refId":"A"},{"expr":"rate(mysql_global_status_innodb_buffer_pool_reads{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"disk reads/s","refId":"B"}],"title":"Buffer Pool Reads","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":16,"y":0},"targets":[{"expr":"rate(mysql_global_status_innodb_rows_read{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"read/s","refId":"A"},{"expr":"rate(mysql_global_status_innodb_rows_inserted{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"inserted/s","refId":"B"},{"expr":"rate(mysql_global_status_innodb_rows_updated{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"updated/s","refId":"C"},{"expr":"rate(mysql_global_status_innodb_rows_deleted{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"deleted/s","refId":"D"}],"title":"InnoDB Row Operations","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":0,"y":7},"targets":[{"expr":"rate(mysql_global_status_innodb_log_waits{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"log waits/s","refId":"A"},{"expr":"rate(mysql_global_status_innodb_row_lock_time{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"row lock time ms/s","refId":"B"}],"title":"InnoDB Waits","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":8,"y":7},"targets":[{"expr":"rate(mysql_global_status_com_commit{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"commit/s","refId":"A"},{"expr":"rate(mysql_global_status_com_rollback{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"rollback/s","refId":"B"}],"title":"Transactions","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":16,"y":7},"targets":[{"expr":"mysql_binlog_size_bytes{namespace=\"__NAMESPACE__\"}","legendFormat":"binlog size","refId":"A"}],"fieldConfig":{"defaults":{"unit":"bytes"}},"title":"Binlog Size","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":0,"y":14},"targets":[{"expr":"rate(mysql_global_status_created_tmp_tables{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"tmp tables/s","refId":"A"},{"expr":"rate(mysql_global_status_created_tmp_disk_tables{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"tmp disk tables/s","refId":"B"}],"title":"Temporary Tables","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":8,"y":14},"targets":[{"expr":"mysql_global_status_open_files{namespace=\"__NAMESPACE__\"} / clamp_min(mysql_global_variables_open_files_limit{namespace=\"__NAMESPACE__\"},1) * 100","legendFormat":"open files %","refId":"A"},{"expr":"mysql_global_status_open_tables{namespace=\"__NAMESPACE__\"}","legendFormat":"open tables","refId":"B"}],"title":"Files & Tables","type":"timeseries"},
+        {"datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":7,"w":8,"x":16,"y":14},"targets":[{"expr":"rate(mysql_global_status_bytes_received{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"received","refId":"A"},{"expr":"rate(mysql_global_status_bytes_sent{namespace=\"__NAMESPACE__\"}[5m])","legendFormat":"sent","refId":"B"}],"fieldConfig":{"defaults":{"unit":"Bps"}},"title":"MySQL Network Throughput","type":"timeseries"}
+      ],
+      "refresh":"30s",
+      "schemaVersion":39,
+      "tags":["archinfra","mysql","performance"],
+      "time":{"from":"now-6h","to":"now"},
+      "title":"MySQL / Performance",
+      "uid":"archinfra-mysql-performance-v2",
+      "version":3
+    }
+#__FEATURE_MONITORING_END__
