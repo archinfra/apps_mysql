@@ -14,12 +14,119 @@
 - 远程 root：**默认开启，默认 `root@'%'`**
 - `mysql_native_password`：**暂时默认开启用于旧客户端兼容，后续计划关闭**
 - 监控 / 告警 / Dashboard：默认开启
+- 备份：当前阶段暂不作为 MySQL 标准交付闭环，推荐安装时显式 `--disable-data-protection`
 
 > 当前版本明确只提供单实例 MySQL。`--mysql-replicas` 必须为 `1`；多副本 StatefulSet 不等于 MySQL HA。
 
 ---
 
-## 1. 产物与能力边界
+## 1. 推荐的标准安装方式
+
+### 1.1 新环境正式交付推荐命令
+
+当前新环境交付建议显式使用以下参数，而不是完全依赖隐式默认值：
+
+```bash
+./mysql-installer-v1.6.0-amd64.run install \
+  --namespace aict \
+  --resource-profile standard \
+  --storage-class ceph-rbd \
+  --storage-size 100Gi \
+  --enable-remote-root \
+  --root-remote-host '%' \
+  --enable-native-password \
+  --disable-nodeport \
+  --enable-monitoring \
+  --enable-service-monitor \
+  --disable-fluentbit \
+  --disable-data-protection \
+  --mysql-slow-query-time 2 \
+  --wait-timeout 10m \
+  -y
+```
+
+这条命令是当前 **Archinfra MySQL 8.4.11 单实例标准交付推荐模板**。
+
+推荐结果：
+
+```text
+Namespace             aict
+MySQL                 8.4.11 LTS
+Replicas              1
+Resource Profile      standard
+MySQL Request         1C / 4Gi
+MySQL Limit           2C / 8Gi
+InnoDB Buffer Pool    5G
+PVC                    100Gi
+StorageClass           ceph-rbd
+Remote Root            ON, root@'%'
+mysql_native_password  ON（过渡兼容）
+NodePort               OFF
+Monitoring             ON
+ServiceMonitor         ON
+Fluent Bit Sidecar     OFF
+Slow Query Threshold   2s
+Data Protection        OFF（当前阶段）
+Timezone               UTC
+Charset                utf8mb4
+Collation              utf8mb4_0900_ai_ci
+```
+
+### 1.2 为什么推荐显式写这些参数
+
+交付命令显式写出关键开关，主要为了让安装记录、实施文档和验收记录能够直接反映真实配置：
+
+| 参数 | 推荐值 | 说明 |
+| --- | --- | --- |
+| `--namespace` | `aict` | 当前 Archinfra 业务默认命名空间；项目有独立规范时可改 |
+| `--resource-profile` | `standard` | 标准交付规格，2C / 8Gi limit |
+| `--storage-class` | `ceph-rbd` | 示例块存储；现场应替换为实际认可的可靠 StorageClass |
+| `--storage-size` | `100Gi` | standard 新装标准容量，显式记录交付容量 |
+| `--enable-remote-root` | 开启 | 当前阶段兼容 Nacos / 历史 JDBC 等使用场景 |
+| `--root-remote-host` | `%` | 当前兼容默认；项目网络边界明确后建议进一步收紧 |
+| `--enable-native-password` | 开启 | MySQL 8.4 过渡兼容策略，后续 TODO 关闭 |
+| `--disable-nodeport` | 关闭外部暴露 | 默认只允许能访问 K8s Service 网络的客户端连接 |
+| `--enable-monitoring` | 开启 | 部署 `mysqld-exporter v0.19.0` |
+| `--enable-service-monitor` | 开启 | 接入标准 Prometheus Stack |
+| `--disable-fluentbit` | 关闭 sidecar | 默认直接采集容器 stdout/stderr，减少重复日志组件 |
+| `--disable-data-protection` | 当前关闭 | 备份体系后续独立完善，不影响本轮 MySQL 交付 |
+| `--mysql-slow-query-time` | `2` | 默认慢查询阈值 2 秒 |
+| `--wait-timeout` | `10m` | 给首次初始化和 InnoDB recovery 足够等待时间 |
+
+> `ceph-rbd` 是推荐示例，不是硬编码要求。现场如果使用 SAN、Local PV、云块存储等，应替换成实际 StorageClass。生产数据库不建议因为安装器默认兼容值是 `nfs` 就直接采用 NFS。
+
+### 1.3 root 密码推荐让安装器自动生成
+
+推荐命令故意不传 `--root-password`。首次安装时 installer 会生成随机密码并写入 `Secret/mysql-auth`；reconcile 时复用已有 Secret。
+
+查看密码：
+
+```bash
+kubectl get secret -n aict mysql-auth \
+  -o jsonpath='{.data.mysql-root-password}' | base64 -d; echo
+```
+
+如果项目要求由密码系统预先生成，也可以显式传：
+
+```bash
+--root-password '<STRONG_PASSWORD>'
+```
+
+不要在正式交付脚本中写固定弱口令。
+
+### 1.4 自定义私有 Registry
+
+客户环境使用自己的 Harbor / Registry 时，在推荐命令中追加：
+
+```bash
+--registry harbor.example.com/kube4
+```
+
+MySQL 会使用对应仓库中的 `mysql:8.4.11`，Exporter 使用 `mysqld-exporter:v0.19.0`。
+
+---
+
+## 2. 产物与能力边界
 
 仓库构建 3 类离线 `.run`：
 
@@ -35,13 +142,13 @@ mysql-benchmark-v1.6.0-<arch>.run
 | `mysql-monitoring` | 给已有 MySQL 补独立 exporter / ServiceMonitor / Dashboard / Alert |
 | `mysql-benchmark` | 对 MySQL 执行标准化 sysbench 压测并输出报告 |
 
-备份能力目前不是本轮交付重点。仓库仍保留 dataprotection 接入协议，客户项目可通过 `--disable-data-protection` 暂时关闭，不影响 MySQL 本体、监控和日志。
+备份能力目前不是本轮交付重点。仓库仍保留 dataprotection 接入协议，但当前标准交付建议使用 `--disable-data-protection`，不影响 MySQL 本体、监控和日志。
 
 ---
 
-## 2. 三档正式资源规格
+## 3. 三档正式资源规格
 
-`--resource-profile` 是 MySQL 私有化交付的官方规格参数，并且**只接受以下三个值**：
+`--resource-profile` 只接受以下三个值：
 
 | Profile | 中文名称 | MySQL Request | MySQL Limit | InnoDB Buffer Pool | 新装 PVC 默认值 | 典型用途 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -49,22 +156,13 @@ mysql-benchmark-v1.6.0-<arch>.run
 | `standard` | 标准模式 | `1C / 4Gi` | **`2C / 8Gi`** | `5G` | `100Gi` | **默认标准交付** |
 | `large` | 大规格模式 | `2C / 8Gi` | **`4C / 16Gi`** | `10G` | `500Gi` | 中高负载、较大工作集 |
 
-不再提供其他 profile 名称或别名。这样安装命令、交付文档、验收记录和运维口径始终只有 `lite / standard / large` 三种。
+不再提供其他 profile 名称或别名。安装命令、交付文档、验收记录和运维口径统一使用 `lite / standard / large`。
 
-其中 `1C2G / 2C8G / 4C16G` 指 **MySQL 主容器的 limit**。默认 requests 约为 limit 的 50%，用于 Kubernetes 调度；`mysqld-exporter`、Fluent Bit 和 initContainer 有独立的小额资源开销。
+`1C2G / 2C8G / 4C16G` 指 **MySQL 主容器的 limit**。requests 默认约为 limit 的 50%；`mysqld-exporter`、Fluent Bit 和 initContainer 有独立的小额资源开销。
 
-### 为什么 Buffer Pool 不直接等于容器内存
+### Buffer Pool
 
-MySQL 还需要为下列内存留空间：
-
-- connection / thread
-- sort / join / read buffer
-- temporary table
-- performance_schema
-- binlog / redo
-- MySQL 自身运行时开销
-
-因此当前默认约为：
+MySQL 还需要为连接、排序、Join、临时表、Performance Schema、binlog / redo 和运行时本身预留内存，因此 Buffer Pool 不等于容器全部内存：
 
 ```text
 lite      2Gi  limit -> 1G  Buffer Pool
@@ -72,7 +170,7 @@ standard  8Gi  limit -> 5G  Buffer Pool
 large     16Gi limit -> 10G Buffer Pool
 ```
 
-可以显式覆盖：
+需要按压测结果调整时：
 
 ```bash
 --innodb-buffer-pool-size 6G
@@ -80,11 +178,11 @@ large     16Gi limit -> 10G Buffer Pool
 
 ---
 
-## 3. 存储规格与 reconcile 规则
+## 4. 存储规格与 reconcile 规则
 
-### 3.1 新安装
+### 4.1 新安装
 
-新安装且没有显式传 `--storage-size` 时，由 profile 决定 PVC：
+未显式传 `--storage-size` 时：
 
 ```text
 lite      -> 20Gi
@@ -92,7 +190,7 @@ standard  -> 100Gi
 large     -> 500Gi
 ```
 
-StorageClass 默认仍为 `nfs`，主要为了兼容既有交付；**生产环境推荐显式指定可靠块存储**：
+StorageClass 默认保留 `nfs` 是为了兼容既有交付；生产推荐显式使用可靠块存储，例如：
 
 ```text
 Ceph RBD
@@ -101,28 +199,7 @@ Local PV
 云盘 / 云块存储
 ```
 
-标准生产示例：
-
-```bash
-./mysql-installer-v1.6.0-amd64.run install \
-  --namespace mysql-prod \
-  --resource-profile standard \
-  --storage-class ceph-rbd \
-  -y
-```
-
-最终默认得到：
-
-```text
-MySQL request : 1C / 4Gi
-MySQL limit   : 2C / 8Gi
-Buffer Pool   : 5G
-PVC           : 100Gi
-```
-
-### 3.2 显式覆盖容量
-
-项目容量不符合标准档位时：
+### 4.2 显式覆盖容量
 
 ```bash
 ./mysql-installer-v1.6.0-amd64.run install \
@@ -134,16 +211,14 @@ PVC           : 100Gi
 
 `--storage-size` 优先于 profile 默认值。
 
-### 3.3 已有 PVC 重跑 installer
+### 4.3 已有 PVC 重跑 installer
 
-已有数据盘不能因为 installer 默认值改变而自动放大或缩小。
-
-因此规则是：
+规则：
 
 ```text
 已有 PVC + 未传 --storage-size
     -> 保留当前 PVC 容量
-    -> 切换 resource-profile 只调整 CPU / 内存 / Buffer Pool
+    -> resource-profile 只调整 CPU / 内存 / Buffer Pool
 
 已有 PVC + 显式 --storage-size
     -> installer 对现有 PVC 发起 resize
@@ -151,137 +226,73 @@ PVC           : 100Gi
 
 注意：
 
-- Kubernetes PVC **不支持缩容**。
+- Kubernetes PVC 不支持缩容。
 - PVC 在线扩容要求 `StorageClass.allowVolumeExpansion=true`。
-- StatefulSet `volumeClaimTemplates` 属于 immutable 字段，installer 会保留旧模板值并直接 patch 现有 PVC。
-- 已绑定 PVC **不能通过 reconcile 原地切换 StorageClass**；更换存储类型必须走新 PVC + 数据迁移流程。
-
-这套规则保证历史环境不会因为新版 profile 默认容量变化，在普通 reconcile 时被意外改盘。
+- StatefulSet `volumeClaimTemplates` 是 immutable 字段，installer 会保留旧模板值并直接管理现有 PVC 的扩容。
+- 已绑定 PVC 不能通过普通 reconcile 原地切换 StorageClass；必须走新 PVC + 数据迁移。
 
 ---
 
-## 4. 最快开始
-
-### 4.1 默认标准模式
-
-```bash
-./mysql-installer-v1.6.0-amd64.run install -y
-```
-
-默认：
-
-```text
-profile      standard
-MySQL limit  2C / 8Gi
-MySQL req    1C / 4Gi
-Buffer Pool  5G
-PVC          100Gi
-StorageClass nfs
-NodePort     OFF
-remote root  ON, root@'%'
-monitoring   ON
-```
-
-默认会：
-
-- 创建 namespace `aict`（不存在时）
-- 创建单副本 StatefulSet `mysql`
-- 创建 headless Service `mysql`
-- 创建 PVC `data-mysql-0`
-- 自动生成 root 密码并写入 `Secret/mysql-auth`
-- 创建并幂等对齐 `root@'%'`
-- 默认启用 `mysql_native_password` 兼容插件
-- 默认关闭 NodePort
-- 默认开启 `mysqld-exporter v0.19.0`
-- 创建 metrics Service / ServiceMonitor / PrometheusRule
-- 创建 `MySQL / Overview` 与 `MySQL / Performance` Dashboard
-- 默认输出错误日志与慢查询日志到容器日志
-
-查看 root 密码：
-
-```bash
-kubectl get secret -n aict mysql-auth \
-  -o jsonpath='{.data.mysql-root-password}' | base64 -d; echo
-```
-
-集群内访问地址：
-
-```text
-mysql-0.mysql.aict.svc.cluster.local:3306
-```
-
----
-
-## 5. 三种推荐安装方式
+## 5. 三种安装规格示例
 
 ### 5.1 精简模式 `lite`
 
 ```bash
 ./mysql-installer-v1.6.0-amd64.run install \
-  --namespace mysql-lite \
+  --namespace aict \
   --resource-profile lite \
   --storage-class nfs \
+  --disable-nodeport \
+  --enable-monitoring \
+  --enable-service-monitor \
   --disable-data-protection \
   -y
 ```
 
-规格：
-
 ```text
-1C / 2Gi limit
-500m / 1Gi request
-1G Buffer Pool
-20Gi PVC
+MySQL limit    1C / 2Gi
+MySQL request  500m / 1Gi
+Buffer Pool    1G
+PVC            20Gi
 ```
 
 适合 Demo、功能验证和轻量项目，不建议用于持续高并发生产负载。
 
 ### 5.2 标准模式 `standard`
 
-```bash
-./mysql-installer-v1.6.0-amd64.run install \
-  --namespace mysql-prod \
-  --resource-profile standard \
-  --storage-class ceph-rbd \
-  --root-password 'Strong-Password-Here' \
-  --disable-data-protection \
-  -y
-```
-
-规格：
+优先使用第 1 节的标准推荐命令。
 
 ```text
-2C / 8Gi limit
-1C / 4Gi request
-5G Buffer Pool
-100Gi PVC
+MySQL limit    2C / 8Gi
+MySQL request  1C / 4Gi
+Buffer Pool    5G
+PVC            100Gi
 ```
-
-这是 Archinfra 当前默认单实例 MySQL 交付档位。
 
 ### 5.3 大规格模式 `large`
 
 ```bash
 ./mysql-installer-v1.6.0-amd64.run install \
-  --namespace mysql-prod \
+  --namespace aict \
   --resource-profile large \
   --storage-class ceph-rbd \
-  --mysql-slow-query-time 1 \
-  --root-password 'Strong-Password-Here' \
+  --storage-size 500Gi \
+  --enable-remote-root \
+  --disable-nodeport \
+  --enable-monitoring \
+  --enable-service-monitor \
   --disable-data-protection \
   -y
 ```
 
-规格：
-
 ```text
-4C / 16Gi limit
-2C / 8Gi request
-10G Buffer Pool
-500Gi PVC
+MySQL limit    4C / 16Gi
+MySQL request  2C / 8Gi
+Buffer Pool    10G
+PVC            500Gi
 ```
 
-大规格仍然是单实例，不等于 HA；更高负载应结合真实压测、慢 SQL、IOPS 和工作集继续评估。
+大规格仍然是单实例，不等于 HA；更高负载需要结合实际 SQL、IOPS、工作集和压测结果继续评估。
 
 ---
 
@@ -301,9 +312,11 @@ mysql-0.mysql.aict.svc.cluster.local:3306
 | 新装 PVC | `100Gi` |
 | root Secret | `mysql-auth` |
 | remote root | `true` / `root@'%'` |
+| `mysql_native_password` | `ON`，过渡兼容 |
 | NodePort | `false` |
 | MySQL port | `3306` |
 | monitoring | `true` |
+| ServiceMonitor | `true` |
 | Fluent Bit | `false` |
 | log emptyDir limit | `2Gi` |
 | slow query threshold | `2s` |
@@ -318,7 +331,7 @@ mysql-0.mysql.aict.svc.cluster.local:3306
 
 - 必需：`kubectl`
 - 默认离线镜像导入/推送：`docker`
-- **目标/离线环境不要求安装 `jq`**
+- 目标 / 离线环境**不要求安装 `jq`**
 
 `jq` 只用于仓库侧 `build.sh` 构建离线安装包。
 
@@ -326,9 +339,9 @@ mysql-0.mysql.aict.svc.cluster.local:3306
 
 ## 7. root 账号与远程访问
 
-MySQL 容器初始化出的 `root@localhost` 保留本地管理能力。
+MySQL 初始化出的 `root@localhost` 保留本地管理能力。
 
-installer 在 MySQL Ready 后幂等对齐：
+installer 在 MySQL Ready 后幂等对齐远程 root：
 
 ```sql
 CREATE USER IF NOT EXISTS 'root'@'%'
@@ -349,9 +362,9 @@ remote root = true
 NodePort    = false
 ```
 
-因此默认并没有把 3306 暴露到客户外部网络；真正的访问范围仍由 Kubernetes 网络、NetworkPolicy、防火墙、ACL、VPN、堡垒机等控制。
+因此默认没有把 3306 通过 NodePort 暴露到客户外部网络；访问范围仍应由 Kubernetes 网络、NetworkPolicy、防火墙、ACL、VPN 或堡垒机控制。
 
-限制来源：
+如果现场能够明确来源范围，优先收紧：
 
 ```bash
 --root-remote-host '10.%'
@@ -367,9 +380,7 @@ NodePort    = false
 
 ## 8. `mysql_native_password` 兼容策略
 
-MySQL 8.4 已默认关闭并弃用 `mysql_native_password`。
-
-当前为了兼容部分历史 JDBC / MySQL client，暂时：
+MySQL 8.4 默认关闭并弃用 `mysql_native_password`。当前为了兼容部分历史 JDBC / MySQL client，暂时：
 
 ```ini
 mysql_native_password=ON
@@ -384,7 +395,7 @@ Nacos / 业务 JDBC 验证 caching_sha2_password
         ->
 迁移到专用账号
         ->
-收紧/关闭 remote root
+收紧 / 关闭 remote root
         ->
 mysql_native_password=OFF
 ```
@@ -393,7 +404,7 @@ mysql_native_password=OFF
 
 ## 9. Runtime / Probe / 优雅停机
 
-运行配置：
+运行配置真源：
 
 ```text
 manifests/mysql-runtime-config.yaml
@@ -436,6 +447,8 @@ terminationGracePeriodSeconds: 120
 
 ## 10. 日志
 
+默认：
+
 ```text
 /var/log/mysql/error.log -> stderr
 /var/log/mysql/slow.log  -> stdout
@@ -460,7 +473,7 @@ Pod 本地日志 `emptyDir` 默认上限：
 --mysql-log-size-limit 4Gi
 ```
 
-长期保存应进入集中日志平台，不应依赖 Pod 文件系统。
+长期保存应进入集中日志平台，不应依赖 Pod 文件系统。因此标准安装推荐 `--disable-fluentbit`，由平台 DaemonSet / Agent 统一消费容器 stdout/stderr；只有明确需要 Pod 内文件型慢日志采集时，再使用 `--enable-fluentbit`。
 
 ---
 
@@ -472,7 +485,7 @@ Pod 本地日志 `emptyDir` 默认上限：
 mysqld-exporter v0.19.0
 ```
 
-账号：
+监控账号：
 
 ```text
 mysqld_exporter
@@ -486,6 +499,8 @@ REPLICATION CLIENT
 SELECT
 MAX_USER_CONNECTIONS 3
 ```
+
+默认 collector 包括 global status / variables、InnoDB metrics、processlist 和 binlog size。
 
 Dashboard：
 
@@ -507,11 +522,21 @@ MySQL / Performance
 - PVC Usage
 - Binlog size
 
-默认规则包括可用性、连接饱和、慢 SQL、死锁、Buffer Pool、临时表和 PVC 80%/90% 容量告警。
+默认规则包括可用性、连接饱和、慢 SQL、死锁、Buffer Pool、临时表和 PVC 80% / 90% 容量告警。
 
 ---
 
-## 12. 常用参数
+## 12. Help 与常用参数
+
+```bash
+./mysql-installer-v1.6.0-amd64.run help
+./mysql-installer-v1.6.0-amd64.run help install
+./mysql-installer-v1.6.0-amd64.run help params
+./mysql-installer-v1.6.0-amd64.run help logging
+./mysql-installer-v1.6.0-amd64.run help examples
+```
+
+核心参数：
 
 ```text
 --namespace <ns>
@@ -542,17 +567,12 @@ MySQL / Performance
 --enable-fluentbit
 --disable-fluentbit
 
+--enable-data-protection
+--disable-data-protection
+
 --mysql-slow-query-time <seconds>
 --registry <repo-prefix>
 --wait-timeout <duration>
-```
-
-完整帮助：
-
-```bash
-./mysql-installer-v1.6.0-amd64.run help install
-./mysql-installer-v1.6.0-amd64.run help params
-./mysql-installer-v1.6.0-amd64.run help logging
 ```
 
 ---
@@ -596,19 +616,19 @@ oltp-read-only
 oltp-read-write
 ```
 
-建议对 `standard` / `large` 生产规格在目标存储上实际压测后再确认最终容量、IOPS 与 Buffer Pool。
+建议在目标 StorageClass 上对 `standard` / `large` 做真实压测，再确认容量、IOPS 与 Buffer Pool。
 
 ---
 
 ## 15. 卸载与数据保留
 
-默认：
+默认卸载：
 
 ```bash
 ./mysql-installer-v1.6.0-amd64.run uninstall -n aict -y
 ```
 
-保留：
+默认保留：
 
 ```text
 PVC
@@ -629,7 +649,7 @@ Secret/mysql-auth
 
 新环境直接使用 MySQL 8.4.11。
 
-已有 MySQL 8.0 PVC 不应把“更换 image tag”视为升级流程。正式升级至少需要：
+已有 MySQL 8.0 PVC 不应把“更换 image tag”当成完整升级流程。正式升级至少需要：
 
 ```text
 备份 / 可恢复验证
@@ -640,7 +660,7 @@ Secret/mysql-auth
   -> 正式变更
 ```
 
-当前 installer 的重点是 **MySQL 8.4.11 新装和同版本 reconcile**。
+当前 installer 重点是 **MySQL 8.4.11 新装和同版本 reconcile**。
 
 ---
 
@@ -659,7 +679,7 @@ Secret/mysql-auth
 
 ```text
 mysql_native_password=ON
-  -> 验证 Nacos/业务支持 caching_sha2_password
+  -> 验证 Nacos / 业务支持 caching_sha2_password
   -> 专用账号迁移
   -> 收紧或关闭 remote root
   -> mysql_native_password=OFF
@@ -670,19 +690,20 @@ mysql_native_password=ON
 ## 18. 生产交付检查清单
 
 ```text
-[ ] MySQL = 8.4.11
+[ ] MySQL = 8.4.11 LTS
 [ ] replicas = 1
-[ ] resource-profile 已明确：lite / standard / large
+[ ] resource-profile = lite / standard / large 中明确的一档
+[ ] 标准项目优先采用 standard = 2C / 8Gi / 100Gi
 [ ] MySQL CPU / Memory limit 与项目资源规划一致
 [ ] InnoDB Buffer Pool 与 memory limit 匹配
 [ ] StorageClass 为项目认可的可靠存储
 [ ] PVC 初始容量满足增长预估
 [ ] 已有 PVC 扩容时 StorageClass.allowVolumeExpansion=true
 [ ] 没有尝试 PVC 缩容或原地切换 StorageClass
-[ ] root 密码不是弱口令
-[ ] NodePort 是否确实需要；默认应关闭
+[ ] root 密码为随机强密码或项目密码系统生成
+[ ] NodePort 默认关闭；如开启已经过安全确认
 [ ] remote root host 范围符合项目要求
-[ ] mysql_native_password 是否仍确有兼容需求
+[ ] mysql_native_password 当前确有兼容需求
 [ ] startupProbe / readiness / liveness 正常
 [ ] terminationGracePeriodSeconds = 120
 [ ] error log / slow log 可通过 kubectl logs 查看
