@@ -23,12 +23,16 @@ generate_mysql_password() {
 ensure_install_root_password() {
   [[ "${ACTION}" == "install" ]] || return 0
 
+  local existing=""
+  existing="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' 2>/dev/null | base64 --decode || true)"
+
   if [[ "${MYSQL_ROOT_PASSWORD_EXPLICIT}" == "true" && -n "${MYSQL_ROOT_PASSWORD}" ]]; then
+    if [[ -n "${existing}" && "${existing}" != "${MYSQL_ROOT_PASSWORD}" ]]; then
+      die "Secret/${AUTH_SECRET} 已存在且密码与 --root-password 不一致。install 不负责在线轮换 root 密码，请先按变更流程轮换数据库密码与 Secret 后再 reconcile。"
+    fi
     return 0
   fi
 
-  local existing=""
-  existing="$(kubectl get secret -n "${NAMESPACE}" "${AUTH_SECRET}" -o 'jsonpath={.data.mysql-root-password}' 2>/dev/null | base64 --decode || true)"
   if [[ -n "${existing}" ]]; then
     MYSQL_ROOT_PASSWORD="${existing}"
     log "复用 Secret/${AUTH_SECRET} 中已有 root 密码"
@@ -36,7 +40,18 @@ ensure_install_root_password() {
   fi
 
   MYSQL_ROOT_PASSWORD="$(generate_mysql_password)"
-  warn "未显式提供 --root-password，已自动生成随机 root 密码并写入 Secret/${AUTH_SECRET}"
+  warn "未显式提供 --root-password，已自动生成随机 root 密码"
+}
+
+
+sync_install_root_secret() {
+  [[ "${ACTION}" == "install" ]] || return 0
+
+  kubectl create secret generic "${AUTH_SECRET}" \
+    -n "${NAMESPACE}" \
+    --from-literal="mysql-root-password=${MYSQL_ROOT_PASSWORD}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  success "Secret/${AUTH_SECRET} 已对齐"
 }
 
 
